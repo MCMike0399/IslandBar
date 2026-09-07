@@ -35,6 +35,12 @@ Left-click the pill to expand (artwork, title, transport). Right-click for Launc
 
 Bar colours come from the artwork: pixels are clustered in Oklab (k-means, plus a separate pass over the colourful pixels so a small accent on a dark cover is not averaged away) and the four most distinct dominant colours are ordered by hue and interpolated into a gradient across the bars. The runner-up colours are pulled halfway towards the dominant one, so the gradient reads as a single tint with a soft shift rather than a rainbow. Hue is kept; lightness is lifted and chroma is clamped to a pastel range for legibility on the black pill, and greyscale art gives grey bars. Before artwork arrives the bars show a lavender-to-mist default.
 
+### Browser tabs
+
+Some browsers publish a Now Playing entry with no title and no artwork (Arc does this from its mini player), which used to leave the card saying just "Arc". When a session from a scriptable browser (Arc, Chrome, Brave, Edge, Vivaldi, Chromium, Opera, Safari) arrives without a title, IslandBar asks the browser for its tabs over Apple Events every 4 seconds, picks the tab on a known media site (preferring the active tab right after a Now Playing event, then sticking with the previous pick while it stays open), and shows its cleaned title. YouTube tabs get the channel name and thumbnail from YouTube's oEmbed endpoint and `i.ytimg.com`, which also tints the bars. Metadata the browser does report always wins; the fallback only fills gaps.
+
+The first time this happens macOS asks "IslandBar wants access to control Arc" (Privacy & Security › Automation). Declining is remembered for the session and the right-click menu gains **Allow reading browser tabs…** to reopen the pane. Like the audio grant, the ad-hoc signature means the prompt returns after each rebuild. The hardened runtime needs the `com.apple.security.automation.apple-events` entitlement for the prompt to appear at all; without it Apple Events fail silently with -1743. `ISLANDBAR_IGNORE_BROWSER_METADATA=1` blanks browser metadata so the fallback can be exercised with any video.
+
 Playback state comes from MediaRemote, with one exception: if MediaRemote reports the app paused while one of its processes is still producing audio (Arc's mini player does this), the pill keeps animating until that output stops for 3 seconds.
 
 ## Updates

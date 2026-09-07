@@ -41,6 +41,10 @@ final class NowPlayingStore {
     var palette = ArtworkPalette.fallback
     var audioPermissionDenied = false
     var usingProcedural = false
+    /// The user declined Apple Events access to the browser, so tab titles cannot be read.
+    var browserAccessDenied = false
+    @ObservationIgnored
+    var retryBrowserAccess: (() -> Void)?
 
     /// Latest eased bar heights, published at `BarLevelPump.frameRate`. Deliberately
     /// outside observation: at 60 Hz a tracked property would re-run every SwiftUI
@@ -103,6 +107,9 @@ final class NowPlayingMonitor: MediaTransport {
     private var restartAttempt = 0
     private var lastPaletteKey: String?
     private var lastArtworkBase64: String?
+    /// The session exactly as MediaRemote reported it, before browser-tab enrichment.
+    private var rawSession: Session?
+    private let browserMedia = BrowserMediaResolver()
 
     /// Playback state as MediaRemote last reported it, before any Core Audio override.
     private var reportedPlaying = false
@@ -139,6 +146,17 @@ final class NowPlayingMonitor: MediaTransport {
         controller.onDecodingError = { error, data in
             DebugLog.line("track info decode failed: \(error) bytes=\(data.count)")
         }
+        browserMedia.onChange = { [weak self] in
+            self?.representCurrentSession()
+        }
+        browserMedia.onAccessDenied = { [weak self] bundleID in
+            DebugLog.line("browser media: access denied for \(bundleID); offering the Automation pane")
+            self?.store.browserAccessDenied = true
+        }
+        store.retryBrowserAccess = { [weak self] in
+            self?.store.browserAccessDenied = false
+            self?.browserMedia.retryAccess()
+        }
     }
 
     func start() {
@@ -153,6 +171,7 @@ final class NowPlayingMonitor: MediaTransport {
         healthTimer?.cancel()
         healthTimer = nil
         stopOutputPoll()
+        browserMedia.stop()
         controller.stopListening()
     }
 
@@ -175,6 +194,8 @@ final class NowPlayingMonitor: MediaTransport {
                     DebugLog.line("session=nil applied after 2s debounce")
                 }
                 self.store.session = nil
+                self.rawSession = nil
+                self.browserMedia.stop()
                 self.store.isPlaying = false
                 self.store.palette = .fallback
                 self.lastPaletteKey = nil
@@ -192,7 +213,10 @@ final class NowPlayingMonitor: MediaTransport {
         nilWork?.cancel()
         nilWork = nil
 
-        let payload = info.payload
+        var payload = info.payload
+        if DebugLog.ignoreBrowserMetadata, ScriptableBrowser.from(bundleID: payload.bundleIdentifier ?? "") != nil {
+            payload = payload.strippingMetadata()
+        }
         let key = "\(payload.title ?? "")\u{1e}\(payload.artist ?? "")\u{1e}\(payload.album ?? "")"
         let reported: Bool = {
             if let flag = payload.isPlaying { return flag }
@@ -207,7 +231,7 @@ final class NowPlayingMonitor: MediaTransport {
         let artwork: NSImage? = payload.artwork
             ?? (store.session?.paletteKey == key ? store.session?.artwork : nil)
         lastArtworkBase64 = artworkBase64
-        let next = Session(
+        let raw = Session(
             bundleID: payload.bundleIdentifier ?? "",
             pid: payload.PID ?? 0,
             title: payload.title ?? "",
@@ -216,7 +240,41 @@ final class NowPlayingMonitor: MediaTransport {
             artwork: artwork,
             paletteKey: key
         )
+        rawSession = raw
 
+        // A browser that publishes no title (Arc's mini player) tells us nothing about the
+        // video; read its tabs instead and re-present when the resolver finds something.
+        if raw.title.isEmpty, ScriptableBrowser.from(bundleID: raw.bundleID) != nil {
+            browserMedia.track(bundleID: raw.bundleID, playing: reported || registry.isOutputActive(for: raw.tapSession))
+        } else {
+            browserMedia.stop()
+        }
+
+        let next = present(raw, reported: reported, artworkBase64: artworkBase64)
+
+        reportedPlaying = reported
+        let playing = effectivePlaying(for: next.tapSession, reported: reported)
+        applyPlaying(playing)
+    }
+
+    /// Merges browser-tab metadata into a title-less browser session.
+    private func enriched(_ raw: Session) -> Session {
+        guard raw.title.isEmpty,
+              let media = browserMedia.current,
+              browserMedia.browser?.bundleID == raw.bundleID
+        else { return raw }
+        var shown = raw
+        shown.title = media.title
+        shown.artist = media.artist
+        if shown.artwork == nil { shown.artwork = media.artwork }
+        shown.paletteKey = "browser\u{1e}\(media.key)"
+        return shown
+    }
+
+    /// Publishes the session and rebuilds the palette when the artwork identity changed.
+    @discardableResult
+    private func present(_ raw: Session, reported: Bool, artworkBase64: String?) -> Session {
+        let next = enriched(raw)
         let sessionChanged = store.session?.paletteKey != next.paletteKey
             || store.session?.bundleID != next.bundleID
             || store.session?.pid != next.pid
@@ -230,16 +288,24 @@ final class NowPlayingMonitor: MediaTransport {
         // event, so the palette is keyed on the artwork bytes as well as the track: a
         // fallback palette from an artwork-less first event is replaced as soon as the
         // cover arrives, and a cover swap on the same track re-tints the bars.
-        let paletteKey = key + "\u{1e}" + (artworkBase64.map { String($0.count) + $0.suffix(64) } ?? "")
+        let artworkIdentity: String = {
+            if let artworkBase64 { return String(artworkBase64.count) + artworkBase64.suffix(64) }
+            if raw.artwork == nil, next.artwork != nil { return "browser-art" }
+            return ""
+        }()
+        let paletteKey = next.paletteKey + "\u{1e}" + artworkIdentity
         if lastPaletteKey != paletteKey {
             lastPaletteKey = paletteKey
             store.palette = ArtworkPalette.make(from: next.artwork)
-            DebugLog.line("palette rebuilt artwork=\(next.artwork != nil) key=\(key)")
+            DebugLog.line("palette rebuilt artwork=\(next.artwork != nil) key=\(next.paletteKey)")
         }
+        return next
+    }
 
-        reportedPlaying = reported
-        let playing = effectivePlaying(for: next.tapSession, reported: reported)
-        applyPlaying(playing)
+    /// The browser resolver learned something new about the current session.
+    private func representCurrentSession() {
+        guard let raw = rawSession else { return }
+        present(raw, reported: reportedPlaying, artworkBase64: lastArtworkBase64)
     }
 
     /// MediaRemote's flag, unless it says paused while the app is still producing audio

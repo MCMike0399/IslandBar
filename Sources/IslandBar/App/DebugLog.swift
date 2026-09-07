@@ -3,6 +3,8 @@ import Foundation
 enum DebugLog {
     static let enabled = ProcessInfo.processInfo.environment["ISLANDBAR_DEBUG"] == "1"
     static let forceProcedural = ProcessInfo.processInfo.environment["ISLANDBAR_FORCE_PROCEDURAL"] == "1"
+    /// Pretend browsers publish no metadata, to exercise the tab-reading fallback on demand.
+    static let ignoreBrowserMetadata = ProcessInfo.processInfo.environment["ISLANDBAR_IGNORE_BROWSER_METADATA"] == "1"
 
     private static let queue = DispatchQueue(label: "dev.burbuja-lab.islandbar.log")
     nonisolated(unsafe) private static let formatter: ISO8601DateFormatter = {

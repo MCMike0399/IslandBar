@@ -72,7 +72,7 @@ struct ExpandedIslandView: View {
         guard let session = store.session else { return "Not Playing" }
         if !session.title.isEmpty { return session.title }
         if !session.artist.isEmpty { return session.artist }
-        return session.appName
+        return store.isPlaying ? "Playing in \(session.appName)" : session.appName
     }
 
     private func transportButton(_ symbol: String, action: @escaping () -> Void) -> some View {

@@ -205,6 +205,17 @@ final class StatusItemController: NSObject {
             menu.addItem(item)
             menu.addItem(.separator())
         }
+        if store.browserAccessDenied {
+            let item = NSMenuItem(
+                title: "Allow reading browser tabs…",
+                action: #selector(openAutomationPrivacy),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.toolTip = "IslandBar reads the playing tab's title from the browser when the browser reports no track. Enable it under Privacy & Security › Automation."
+            menu.addItem(item)
+            menu.addItem(.separator())
+        }
         let login = NSMenuItem(
             title: "Launch at Login",
             action: #selector(toggleLogin),
@@ -222,7 +233,6 @@ final class StatusItemController: NSObject {
             keyEquivalent: ""
         )
         updates.target = self
-        updates.isEnabled = !updater.status.isInstalling
         menu.addItem(updates)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
@@ -233,6 +243,13 @@ final class StatusItemController: NSObject {
 
     @objc private func openAudioPrivacy() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func openAutomationPrivacy() {
+        store.retryBrowserAccess?()
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") {
             NSWorkspace.shared.open(url)
         }
     }
