@@ -7,7 +7,8 @@ final class ProceduralDriver: @unchecked Sendable {
     private var t: Double = 0
     private var envelope: [Float] = BarLevels.rest.values
     private let phases: [(f1: Double, f2: Double, p: Double)] = (0..<BarLevels.count).map { (i: Int) -> (f1: Double, f2: Double, p: Double) in
-        let k = Double(i)
+        // Spread the same frequency range over however many bars there are.
+        let k = Double(i) * 7 / Double(max(1, BarLevels.count - 1))
         let f1: Double = 0.90 + 0.12 * k
         let f2: Double = 1.70 + 0.11 * k
         let p: Double = 0.7 * k

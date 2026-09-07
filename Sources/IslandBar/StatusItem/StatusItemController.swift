@@ -58,7 +58,8 @@ final class StatusItemController: NSObject {
         popover.behavior = .transient
         popover.delegate = self
         popover.contentSize = ExpandedIslandMetrics.size
-        popover.contentViewController = makeExpandedController()
+        // The card is built on first open (see togglePopover); a hosting tree that may
+        // never be shown is not worth keeping resident.
 
         startObserving()
     }

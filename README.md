@@ -1,6 +1,6 @@
 # IslandBar
 
-Menu-bar Now Playing visualizer for Apple Silicon Macs: a compact Dynamic Island pill (eight artwork-tinted bars) that dances only while media plays.
+Menu-bar Now Playing visualizer for Apple Silicon Macs: a compact Dynamic Island pill (twelve artwork-tinted bars, tall at the edges and lower in the middle) that dances only while media plays.
 
 macOS 15.4+, unsandboxed. Built with SwiftPM and Command Line Tools — no Xcode project.
 
@@ -33,7 +33,7 @@ ISLANDBAR_DEBUG=1 dist/IslandBar.app/Contents/MacOS/IslandBar
 
 Left-click the pill to expand (artwork, title, transport). Right-click for Launch at Login, Settings, and Quit. The pill is always visible: while nothing is playing the bars collapse to a flat gray line.
 
-Bar colours come from the artwork: pixels are clustered in Oklab (k-means, plus a separate pass over the colourful pixels so a small accent on a dark cover is not averaged away) and the four most distinct dominant colours are ordered by hue and interpolated into a gradient across the eight bars. Only lightness is lifted for legibility on the black pill, so hues stay true and greyscale art gives grey bars.
+Bar colours come from the artwork: pixels are clustered in Oklab (k-means, plus a separate pass over the colourful pixels so a small accent on a dark cover is not averaged away) and the four most distinct dominant colours are ordered by hue and interpolated into a gradient across the bars. The runner-up colours are pulled halfway towards the dominant one, so the gradient reads as a single tint with a soft shift rather than a rainbow. Hue is kept; lightness is lifted and chroma is clamped to a pastel range for legibility on the black pill, and greyscale art gives grey bars. Before artwork arrives the bars show a lavender-to-mist default.
 
 Playback state comes from MediaRemote, with one exception: if MediaRemote reports the app paused while one of its processes is still producing audio (Arc's mini player does this), the pill keeps animating until that output stops for 3 seconds.
 

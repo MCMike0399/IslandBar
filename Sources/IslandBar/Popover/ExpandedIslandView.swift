@@ -62,7 +62,7 @@ struct ExpandedIslandView: View {
                 flat: !store.isPlaying,
                 animating: store.isPlaying && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
                 palette: store.palette,
-                metrics: BarMetrics(barWidth: 5, gap: 3, minHeight: 4, maxHeight: 24),
+                metrics: BarMetrics(barWidth: 4, gap: 2.5, minHeight: 3, maxHeight: 24),
                 glow: true
             )
         }

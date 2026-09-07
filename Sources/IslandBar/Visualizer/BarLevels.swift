@@ -4,7 +4,7 @@ struct BarLevels: Equatable, Sendable {
     var values: [Float]
 
     /// Number of bars everywhere: analyzer bands, procedural motion, palette entries, views.
-    static let count = 8
+    static let count = 12
     static let rest = BarLevels(values: (0..<count).map { $0 % 2 == 0 ? 0.30 : 0.45 })
 
     init(values: [Float]) {
@@ -17,8 +17,10 @@ struct BarLevels: Equatable, Sendable {
         }
     }
 
+    static func clampPlaying(_ v: Float) -> Float { min(1.0, max(0.12, v)) }
+
     func clampedPlaying() -> BarLevels {
-        BarLevels(values: values.map { min(1.0, max(0.12, $0)) })
+        BarLevels(values: values.map(Self.clampPlaying))
     }
 }
 

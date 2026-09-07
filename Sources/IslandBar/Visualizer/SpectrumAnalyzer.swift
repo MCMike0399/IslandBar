@@ -30,6 +30,10 @@ final class SpectrumAnalyzer: @unchecked Sendable {
     private var meanDb: [Float] = [Float](repeating: 0, count: BarLevels.count)
     private var devDb: [Float] = [Float](repeating: 6, count: BarLevels.count)
     private var primed = false
+    /// Per-frame scratch, reused so the ~94 analysis frames a second allocate nothing.
+    private var db = [Float](repeating: -120, count: BarLevels.count)
+    private var normalized = [Float](repeating: 0, count: BarLevels.count)
+    private var published = [Float](repeating: 0, count: BarLevels.count)
     /// Frames left in the fast-adapting phase after (re)start. Resuming after a pause
     /// used to pin every bar at 1.0 for seconds: the statistics primed on the fade-in
     /// or on silence and then crawled up to the real level at the slow rate.
@@ -104,8 +108,10 @@ final class SpectrumAnalyzer: @unchecked Sendable {
     private func rebuildBandsIfNeeded() {
         guard bandBinsRate != sampleRate else { return }
         bandBinsRate = sampleRate
-        // Roughly log-spaced edges; sub-bass to air across the eight bars.
-        let edges: [Double] = [40, 90, 200, 450, 1_000, 2_200, 5_000, 9_000, 14_000]
+        // Log-spaced edges from sub-bass to air, one band per bar. Every band keeps
+        // at least one FFT bin; at 48 kHz the lowest few are single bins.
+        let lowHz = 40.0, highHz = 14_000.0
+        let edges = (0...bandCount).map { lowHz * pow(highHz / lowHz, Double($0) / Double(bandCount)) }
         let binHz = sampleRate / Double(n)
         bandBins = (0..<bandCount).map { band in
             let lo = max(1, Int((edges[band] / binHz).rounded(.up)))
@@ -153,7 +159,6 @@ final class SpectrumAnalyzer: @unchecked Sendable {
         }
 
         rebuildBandsIfNeeded()
-        var db = [Float](repeating: -120, count: bandCount)
         magnitudes.withUnsafeBufferPointer { mags in
             for (band, bins) in bandBins.enumerated() {
                 let count = bins.hi - bins.lo
@@ -185,7 +190,6 @@ final class SpectrumAnalyzer: @unchecked Sendable {
         if warm && informative { warmupFrames -= 1 }
         let meanAlpha: Float = warm ? 0.06 : 0.012
         let devAlpha: Float = warm ? 0.03 : 0.006
-        var normalized = [Float](repeating: 0, count: bandCount)
         for i in 0..<bandCount {
             let delta = db[i] - meanDb[i]
             if informative {
@@ -204,7 +208,7 @@ final class SpectrumAnalyzer: @unchecked Sendable {
 
         // Very quiet material should not dance at half height.
         if rmsDb < -60 {
-            normalized = [Float](repeating: 0.12, count: bandCount)
+            for i in 0..<bandCount { normalized[i] = 0.12 }
         } else if rmsDb < -40 {
             let k = (rmsDb + 60) / 20
             for i in 0..<bandCount { normalized[i] = 0.12 + (normalized[i] - 0.12) * k }
@@ -212,16 +216,16 @@ final class SpectrumAnalyzer: @unchecked Sendable {
 
         for i in 0..<bandCount {
             envelope[i] = envelopeStep(current: envelope[i], target: normalized[i])
+            published[i] = BarLevels.clampPlaying(envelope[i])
         }
-        let published = BarLevels(values: envelope).clampedPlaying().values
         shared.publish(bars: published, rmsDb: rmsDb, fromTap: true)
     }
 
     private func publishQuiet(rmsDb: Float) {
         for i in 0..<bandCount {
             envelope[i] = envelopeStep(current: envelope[i], target: 0.12)
+            published[i] = BarLevels.clampPlaying(envelope[i])
         }
-        let published = BarLevels(values: envelope).clampedPlaying().values
         shared.publish(bars: published, rmsDb: rmsDb, fromTap: true)
     }
 }

@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 enum CompactIslandMetrics {
-    static let bars = BarMetrics(barWidth: 2.5, gap: 2, minHeight: 2.5, maxHeight: 14)
+    /// Thin bars on a 3.5 pt pitch: whole pixels at 2x, so edges stay crisp.
+    static let bars = BarMetrics(barWidth: 2, gap: 1.5, minHeight: 2, maxHeight: 14)
     /// Bars only, no artwork: N bars + (N-1) gaps, plus 8 pt insets each side.
     static let pillWidth: CGFloat = bars.totalWidth + 16
     static let pillHeight: CGFloat = 18

@@ -6,31 +6,50 @@ struct BarMetrics: Equatable {
     var barWidth: CGFloat
     var gap: CGFloat
     var minHeight: CGFloat
+    /// Full height, reached only by the outermost bars.
     var maxHeight: CGFloat
+    /// How much shorter the middle bar's ceiling is than the edge bars', as a fraction
+    /// of `maxHeight`. The island waveform tapers this way: tall at both ends, low in
+    /// the centre, so the bars read as one shape rather than a bar chart.
+    var centerDip: CGFloat = 0.42
 
     var totalWidth: CGFloat {
         CGFloat(BarLevels.count) * barWidth + CGFloat(BarLevels.count - 1) * gap
     }
 
     var size: CGSize { CGSize(width: totalWidth, height: maxHeight) }
+
+    /// Height ceiling for bar `i`: `maxHeight` at the edges, easing down to
+    /// `maxHeight * (1 - centerDip)` in the middle.
+    func maxHeight(forBar i: Int) -> CGFloat {
+        guard BarLevels.count > 1 else { return maxHeight }
+        let t = CGFloat(i) / CGFloat(BarLevels.count - 1)
+        return maxHeight * (1 - centerDip * sin(.pi * t))
+    }
+
+    func barX(_ i: Int) -> CGFloat { CGFloat(i) * (barWidth + gap) }
 }
 
-/// Core Animation bars. Each level frame only swaps one `CAShapeLayer` path, which
-/// the render server rasterises on the GPU; nothing on our side lays out or draws.
+/// Core Animation bars, one plain `CALayer` per bar. A level frame only changes each
+/// layer's bounds height; the render server draws rounded rectangles straight from
+/// the layer properties. There is no gradient-through-mask offscreen pass and no
+/// path to rasterise, which is what the previous CAShapeLayer/CAGradientLayer pair
+/// cost WindowServer sixty times a second. Heights are snapped to device pixels and
+/// a frame that moves nothing by a whole pixel is not committed at all.
 /// SwiftUI is involved only for the rare changes (palette, playing/idle).
 @MainActor
 final class BarsLayerView: NSView {
     let metrics: BarMetrics
-    private let gradientLayer = CAGradientLayer()
-    private let maskLayer = CAShapeLayer()
-    private let glowLayer: CAShapeLayer?
-    private let flatLayer = CAShapeLayer()
-    private var levels = BarLevels.rest
+    private let barLayers: [CALayer]
+    private let glowLayer: CALayer?
+    private let flatLayer = CALayer()
+    private var heights: [CGFloat]
     private var flat = true
+    private var scale: CGFloat = 2
     /// False while idle or with Reduce Motion on: incoming levels are ignored and
     /// the bars sit at their rest heights.
     var animating = false {
-        didSet { if !animating { applyPath(for: .rest) } }
+        didSet { if !animating { apply(.rest) } }
     }
 
     /// Neutral idle line, independent of the last artwork.
@@ -38,43 +57,17 @@ final class BarsLayerView: NSView {
 
     init(metrics: BarMetrics, glow: Bool) {
         self.metrics = metrics
-        glowLayer = glow ? CAShapeLayer() : nil
+        barLayers = (0..<BarLevels.count).map { _ in CALayer() }
+        glowLayer = glow ? CALayer() : nil
+        heights = [CGFloat](repeating: -1, count: BarLevels.count)
         super.init(frame: NSRect(origin: .zero, size: metrics.size))
         wantsLayer = true
         layerContentsRedrawPolicy = .never
 
         let bounds = CGRect(origin: .zero, size: metrics.size)
+        let midY = metrics.maxHeight / 2
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        gradientLayer.frame = bounds
-        gradientLayer.startPoint = CGPoint(x: 0, y: 0.5)
-        gradientLayer.endPoint = CGPoint(x: 1, y: 0.5)
-        // The palette is already a gradient across the eight bars; a stop at each
-        // bar centre reproduces the per-bar colours.
-        gradientLayer.locations = (0..<BarLevels.count).map { i in
-            let center = CGFloat(i) * (metrics.barWidth + metrics.gap) + metrics.barWidth / 2
-            return NSNumber(value: Double(center / metrics.totalWidth))
-        }
-        gradientLayer.opacity = 0
-        maskLayer.frame = bounds
-        maskLayer.fillColor = NSColor.black.cgColor
-        gradientLayer.mask = maskLayer
-
-        flatLayer.frame = bounds
-        flatLayer.fillColor = Self.idleColor.cgColor
-        let line = CGRect(
-            x: 0,
-            y: (metrics.maxHeight - metrics.minHeight) / 2,
-            width: metrics.totalWidth,
-            height: metrics.minHeight
-        )
-        flatLayer.path = CGPath(
-            roundedRect: line,
-            cornerWidth: metrics.minHeight / 2,
-            cornerHeight: metrics.minHeight / 2,
-            transform: nil
-        )
-
         if let glowLayer {
             glowLayer.frame = bounds
             glowLayer.shadowOpacity = 0.45
@@ -83,9 +76,26 @@ final class BarsLayerView: NSView {
             glowLayer.opacity = 0
             layer?.addSublayer(glowLayer)
         }
-        layer?.addSublayer(gradientLayer)
+        for (i, bar) in barLayers.enumerated() {
+            // Fixed centre; only the bounds height changes per frame, so the bar
+            // grows symmetrically without touching its position.
+            bar.position = CGPoint(x: metrics.barX(i) + metrics.barWidth / 2, y: midY)
+            bar.bounds = CGRect(x: 0, y: 0, width: metrics.barWidth, height: metrics.minHeight)
+            bar.cornerRadius = metrics.barWidth / 2
+            bar.opacity = 0
+            layer?.addSublayer(bar)
+        }
+
+        flatLayer.frame = CGRect(
+            x: 0,
+            y: midY - metrics.minHeight / 2,
+            width: metrics.totalWidth,
+            height: metrics.minHeight
+        )
+        flatLayer.cornerRadius = metrics.minHeight / 2
+        flatLayer.backgroundColor = Self.idleColor.cgColor
         layer?.addSublayer(flatLayer)
-        applyPath(for: .rest)
+        apply(.rest)
         CATransaction.commit()
     }
 
@@ -99,19 +109,25 @@ final class BarsLayerView: NSView {
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
-        let scale = window?.backingScaleFactor ?? 2
-        for sublayer in [gradientLayer, maskLayer, flatLayer] + (glowLayer.map { [$0] } ?? []) {
-            sublayer.contentsScale = scale
-        }
+        let next = window?.backingScaleFactor ?? 2
+        guard next != scale else { return }
+        scale = next
+        // Re-snap to the new pixel grid.
+        heights = [CGFloat](repeating: -1, count: BarLevels.count)
+        apply(animating ? levels : .rest)
     }
 
+    private var levels = BarLevels.rest
+
     func setPalette(_ palette: ArtworkPalette) {
+        guard palette.colors.count == BarLevels.count else { return }
         let colors = palette.colors.map { NSColor($0).cgColor }
-        guard colors.count == BarLevels.count, colors != (gradientLayer.colors as? [CGColor]) else { return }
+        guard zip(barLayers, colors).contains(where: { $0.backgroundColor != $1 }) else { return }
         CATransaction.begin()
         CATransaction.setAnimationDuration(0.6)
-        gradientLayer.colors = colors
-        glowLayer?.fillColor = colors[BarLevels.count / 2]
+        for (bar, color) in zip(barLayers, colors) {
+            bar.backgroundColor = color
+        }
         glowLayer?.shadowColor = colors[BarLevels.count / 2]
         CATransaction.commit()
     }
@@ -121,7 +137,7 @@ final class BarsLayerView: NSView {
         self.flat = flat
         CATransaction.begin()
         CATransaction.setAnimationDuration(0.35)
-        gradientLayer.opacity = flat ? 0 : 1
+        for bar in barLayers { bar.opacity = flat ? 0 : 1 }
         glowLayer?.opacity = flat ? 0 : 1
         flatLayer.opacity = flat ? 1 : 0
         CATransaction.commit()
@@ -129,28 +145,42 @@ final class BarsLayerView: NSView {
 
     func setLevels(_ levels: BarLevels) {
         guard animating else { return }
-        applyPath(for: levels)
+        apply(levels)
     }
 
-    private func applyPath(for levels: BarLevels) {
-        guard levels != self.levels || maskLayer.path == nil else { return }
+    private func apply(_ levels: BarLevels) {
         self.levels = levels
-        let path = Self.path(for: levels, metrics: metrics)
+        var next = heights
+        var changed = false
+        for i in 0..<BarLevels.count {
+            let level = i < levels.values.count ? CGFloat(levels.values[i]) : 0
+            let raw = max(metrics.minHeight, level * metrics.maxHeight(forBar: i))
+            let snapped = (raw * scale).rounded() / scale
+            if snapped != next[i] {
+                next[i] = snapped
+                changed = true
+            }
+        }
+        guard changed else { return }
+        heights = next
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        maskLayer.path = path
-        glowLayer?.path = path
+        for (i, bar) in barLayers.enumerated() {
+            bar.bounds.size.height = next[i]
+        }
+        if let glowLayer {
+            glowLayer.shadowPath = Self.path(heights: next, metrics: metrics)
+        }
         CATransaction.commit()
     }
 
-    private static func path(for levels: BarLevels, metrics: BarMetrics) -> CGPath {
+    /// Outline of all bars, used only as the glow's `shadowPath`: a shadow with an
+    /// explicit path is blurred geometry, not a rasterised copy of the layer.
+    private static func path(heights: [CGFloat], metrics: BarMetrics) -> CGPath {
         let path = CGMutablePath()
         let midY = metrics.maxHeight / 2
-        for i in 0..<BarLevels.count {
-            let level = i < levels.values.count ? CGFloat(levels.values[i]) : 0
-            let height = max(metrics.minHeight, level * metrics.maxHeight)
-            let x = CGFloat(i) * (metrics.barWidth + metrics.gap)
-            let bar = CGRect(x: x, y: midY - height / 2, width: metrics.barWidth, height: height)
+        for (i, height) in heights.enumerated() {
+            let bar = CGRect(x: metrics.barX(i), y: midY - height / 2, width: metrics.barWidth, height: height)
             path.addRoundedRect(in: bar, cornerWidth: metrics.barWidth / 2, cornerHeight: metrics.barWidth / 2)
         }
         return path

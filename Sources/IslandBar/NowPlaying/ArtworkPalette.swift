@@ -4,65 +4,62 @@ import SwiftUI
 struct ArtworkPalette: Equatable {
     var colors: [Color]
 
+    /// Shown before any artwork arrives: a quiet lavender-to-mist wash, clearly "no
+    /// track yet" next to the colour a real cover produces, and never mistaken for
+    /// a white-covered album (the old white/blue/peach sweep was).
     static let fallback: ArtworkPalette = {
         let anchors = [
-            Oklab.fromSRGB(r: 0.96, g: 0.96, b: 0.98),
-            Oklab.fromSRGB(r: 0.72, g: 0.80, b: 0.98),
-            Oklab.fromSRGB(r: 0.98, g: 0.80, b: 0.70),
-            Oklab.fromSRGB(r: 0.82, g: 0.86, b: 0.96),
+            Oklab.fromSRGB(r: 0.62, g: 0.60, b: 0.90),
+            Oklab.fromSRGB(r: 0.70, g: 0.68, b: 0.92),
+            Oklab.fromSRGB(r: 0.78, g: 0.80, b: 0.94),
+            Oklab.fromSRGB(r: 0.86, g: 0.90, b: 0.95),
         ]
         return ArtworkPalette(colors: colors(through: anchors))
     }()
 
+    /// Lightness band and chroma clamp for the displayed bars. Pastel on purpose: the
+    /// island tint has to sit on a black pill without shouting, and a lower chroma
+    /// cap is what keeps a red cover and a blue cover looking like the same product
+    /// while still being unmistakably red and blue.
+    private static let minL = 0.70
+    private static let maxL = 0.93
+    private static let chromaScale = 0.9
+    private static let minChroma = 0.05
+    private static let maxChroma = 0.12
+    /// How far the secondary picks are pulled towards the dominant colour before
+    /// they become gradient anchors. 0 keeps every cluster as-is (rainbow sweep);
+    /// 1 collapses the bars to one flat colour.
+    private static let blendTowardDominant = 0.5
+
     /// Extracts up to four distinct dominant colours from the artwork by k-means
     /// clustering in Oklab and spreads them across the bars as a smooth gradient, the
-    /// way the iPhone's Dynamic Island tints its Now Playing waveform. Hue and chroma
-    /// are preserved; only lightness is lifted so the bars stay legible on the black
-    /// pill. Greyscale art yields grey bars instead of an invented tint.
+    /// way the iPhone's Dynamic Island tints its Now Playing waveform. The most
+    /// dominant colour sets the family; the others are pulled towards it so the
+    /// gradient reads as one tint with a soft shift, not four competing hues. Hue is
+    /// preserved; lightness is lifted and chroma is clamped so the bars stay legible
+    /// and calm on the black pill. Greyscale art yields grey bars instead of an
+    /// invented tint.
     static func make(from image: NSImage?) -> ArtworkPalette {
         guard let image, let pixels = samplePixels(image), pixels.count >= 16 else {
             return .fallback
         }
         let picks = pickPalette(clusterize(pixels))
         guard !picks.isEmpty else { return .fallback }
-        return ArtworkPalette(colors: colors(through: orderForGradient(picks)))
+        return ArtworkPalette(colors: colors(through: picks))
     }
 
     /// Interpolates the anchors in Oklab into one colour per bar and maps them for display.
     static func colors(through anchors: [Oklab]) -> [Color] {
         let n = BarLevels.count
         guard anchors.count > 1 else {
-            return (0..<n).map { _ in Color(nsColor: display(anchors[0], minL: 0.64, chromaScale: 1.2)) }
+            return (0..<n).map { _ in Color(nsColor: display(anchors[0])) }
         }
         return (0..<n).map { i in
             let t = Double(i) / Double(n - 1) * Double(anchors.count - 1)
             let k = min(anchors.count - 2, Int(t))
             let f = t - Double(k)
-            let a = anchors[k], b = anchors[k + 1]
-            let lab = Oklab(L: a.L + (b.L - a.L) * f, a: a.a + (b.a - a.a) * f, b: a.b + (b.b - a.b) * f)
-            return Color(nsColor: display(lab, minL: 0.64, chromaScale: 1.2))
+            return Color(nsColor: display(anchors[k].mixed(toward: anchors[k + 1], f)))
         }
-    }
-
-    /// Chromatic picks sorted by hue so the gradient sweeps instead of zig-zagging;
-    /// neutrals go at the end.
-    private static func orderForGradient(_ picks: [Oklab]) -> [Oklab] {
-        let chromatic = picks.filter { $0.chroma >= 0.03 }
-        let neutral = picks.filter { $0.chroma < 0.03 }
-        guard chromatic.count > 1 else { return chromatic + neutral }
-        // Start the sweep at the largest hue gap so a red/blue pair does not wrap through green.
-        let sorted = chromatic.sorted { atan2($0.b, $0.a) < atan2($1.b, $1.a) }
-        var bestStart = 0
-        var bestGap = -1.0
-        for i in sorted.indices {
-            let h0 = atan2(sorted[i].b, sorted[i].a)
-            let h1 = atan2(sorted[(i + 1) % sorted.count].b, sorted[(i + 1) % sorted.count].a)
-            var gap = h1 - h0
-            if gap <= 0 { gap += 2 * .pi }
-            if gap > bestGap { bestGap = gap; bestStart = (i + 1) % sorted.count }
-        }
-        let rotated = Array(sorted[bestStart...] + sorted[..<bestStart])
-        return rotated + neutral
     }
 
     // MARK: Cluster selection
@@ -117,8 +114,10 @@ struct ArtworkPalette: Equatable {
     }
 
     /// Up to four mutually distinct colours, best score first. Colourful clusters are
-    /// taken before neutrals (a dark cover with one red accent reads as "red"); when the
-    /// art has fewer distinct colours the list is padded with lighter variants.
+    /// taken before neutrals (a dark cover with one red accent reads as "red"); the
+    /// runners-up are then pulled towards the winner and everything is ordered dark to
+    /// light so the gradient stays in one family and sweeps monotonically; when the art
+    /// has fewer distinct colours the ramp is padded with lighter variants.
     static func pickPalette(_ clusters: [Cluster]) -> [Oklab] {
         let ranked = clusters.sorted { score($0) > score($1) }
         var chosen: [Cluster] = []
@@ -133,22 +132,30 @@ struct ArtworkPalette: Equatable {
         take { _ in true }
         var colors = chosen.map(\.vivid)
         guard let base = colors.first else { return [] }
-        var i = 0
+        // Pull the runners-up towards the dominant colour, then order everything dark to
+        // light. Every anchor now sits in a small ball around the dominant, so a
+        // lightness ramp is a monotonic sweep; hue-sorting gave lightness zig-zags.
+        colors = [base] + colors.dropFirst().map { base.mixed(toward: $0, 1 - blendTowardDominant) }
+        colors.sort { $0.L < $1.L }
+        // Too few distinct colours: continue the ramp with lighter nudges of the last one.
+        let tail = colors[colors.count - 1]
+        var step = 1
         while colors.count < 4 {
-            let source = colors[i % chosen.count]
-            colors.append(variant(of: source, step: i / chosen.count + 1, monochrome: base.chroma < 0.03))
-            i += 1
+            colors.append(variant(of: tail, step: step, monochrome: base.chroma < 0.03))
+            step += 1
         }
         return colors
     }
 
     private static func variant(of c: Oklab, step: Int, monochrome: Bool) -> Oklab {
         if monochrome {
-            return Oklab(L: min(0.95, c.L + 0.12 * Double(step)), a: c.a, b: c.b)
+            return Oklab(L: min(0.95, c.L + 0.08 * Double(step)), a: c.a, b: c.b)
         }
-        let angle = 0.35 * Double(step)
+        // About 9 degrees of hue and a touch of lightness per step: a solid red cover
+        // ends in a lighter coral, not in gold.
+        let angle = 0.15 * Double(step)
         return Oklab(
-            L: min(0.95, c.L + 0.05 * Double(step)),
+            L: min(0.95, c.L + 0.06 * Double(step)),
             a: (c.a * cos(angle) - c.b * sin(angle)) * 0.9,
             b: (c.a * sin(angle) + c.b * cos(angle)) * 0.9
         )
@@ -156,15 +163,20 @@ struct ArtworkPalette: Equatable {
 
     // MARK: Display mapping
 
-    private static func display(_ lab: Oklab, minL: Double, chromaScale: Double) -> NSColor {
+    private static func display(_ lab: Oklab) -> NSColor {
         var c = lab
-        c.a *= chromaScale
-        c.b *= chromaScale
-        c.L = min(0.95, max(minL, c.L))
-        if c.chroma < 0.012 {
+        let chroma = c.chroma
+        if chroma < 0.012 {
+            // Neutral stays neutral; a tint invented for grey art looks wrong.
             c.a = 0
             c.b = 0
+        } else {
+            // Keep the hue, clamp the strength: a whisper of colour at least, never neon.
+            let target = min(maxChroma, max(minChroma, chroma * chromaScale))
+            c.a *= target / chroma
+            c.b *= target / chroma
         }
+        c.L = min(maxL, max(minL, c.L))
         let rgb = c.toSRGBClipped()
         return NSColor(deviceRed: rgb.r, green: rgb.g, blue: rgb.b, alpha: 1)
     }
@@ -304,6 +316,11 @@ struct Oklab: Equatable {
     }
 
     func distance(to o: Oklab) -> Double { squaredDistance(to: o).squareRoot() }
+
+    /// Linear interpolation; `t` 0 is `self`, 1 is `o`.
+    func mixed(toward o: Oklab, _ t: Double) -> Oklab {
+        Oklab(L: L + (o.L - L) * t, a: a + (o.a - a) * t, b: b + (o.b - b) * t)
+    }
 
     static func fromSRGB(r: Double, g: Double, b: Double) -> Oklab {
         func lin(_ c: Double) -> Double { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
