@@ -15,14 +15,21 @@ final class StatusItemController: NSObject {
     private var hosting: PassthroughHostingView<AnyView>?
     private var hostedHeight: CGFloat = 0
     private let settings: SettingsWindowController
+    private let updater: UpdateController
     /// Accessory apps do not reliably get transient popovers dismissed by clicks in
     /// other apps, so watch for clicks ourselves while the popover is up.
     private var clickAwayMonitors: [Any] = []
 
-    init(store: NowPlayingStore, preferences: Preferences, settings: SettingsWindowController) {
+    init(
+        store: NowPlayingStore,
+        preferences: Preferences,
+        settings: SettingsWindowController,
+        updater: UpdateController
+    ) {
         self.store = store
         self.preferences = preferences
         self.settings = settings
+        self.updater = updater
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
 
@@ -177,6 +184,17 @@ final class StatusItemController: NSObject {
 
     private func contextMenu() -> NSMenu {
         let menu = NSMenu()
+        if let release = updater.status.release, !updater.status.isInstalling {
+            let item = NSMenuItem(
+                title: "Update to IslandBar \(release.version)…",
+                action: #selector(showUpdate),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.image = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
+            menu.addItem(item)
+            menu.addItem(.separator())
+        }
         if store.audioPermissionDenied {
             let item = NSMenuItem(
                 title: "Enable audio analysis…",
@@ -198,6 +216,14 @@ final class StatusItemController: NSObject {
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
+        let updates = NSMenuItem(
+            title: updater.status.isInstalling ? "Installing Update…" : "Check for Updates…",
+            action: #selector(showUpdate),
+            keyEquivalent: ""
+        )
+        updates.target = self
+        updates.isEnabled = !updater.status.isInstalling
+        menu.addItem(updates)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
@@ -217,6 +243,10 @@ final class StatusItemController: NSObject {
 
     @objc private func showSettings() {
         settings.show()
+    }
+
+    @objc private func showUpdate() {
+        updater.checkForUpdates()
     }
 
     @objc private func quit() {

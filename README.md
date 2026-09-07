@@ -31,11 +31,27 @@ ISLANDBAR_DEBUG=1 dist/IslandBar.app/Contents/MacOS/IslandBar
 
 ## Usage
 
-Left-click the pill to expand (artwork, title, transport). Right-click for Launch at Login, Settings, and Quit. The pill is always visible: while nothing is playing the bars collapse to a flat gray line.
+Left-click the pill to expand (artwork, title, transport). Right-click for Launch at Login, Settings, Check for Updates, and Quit. The pill is always visible: while nothing is playing the bars collapse to a flat gray line.
 
 Bar colours come from the artwork: pixels are clustered in Oklab (k-means, plus a separate pass over the colourful pixels so a small accent on a dark cover is not averaged away) and the four most distinct dominant colours are ordered by hue and interpolated into a gradient across the bars. The runner-up colours are pulled halfway towards the dominant one, so the gradient reads as a single tint with a soft shift rather than a rainbow. Hue is kept; lightness is lifted and chroma is clamped to a pastel range for legibility on the black pill, and greyscale art gives grey bars. Before artwork arrives the bars show a lavender-to-mist default.
 
 Playback state comes from MediaRemote, with one exception: if MediaRemote reports the app paused while one of its processes is still producing audio (Arc's mini player does this), the pill keeps animating until that output stops for 3 seconds.
+
+## Updates
+
+IslandBar updates itself from [GitHub Releases](https://github.com/MCMike0399/IslandBar/releases). Twenty seconds after launch, every six hours while running, and after the Mac wakes, it reads the latest release and compares it with the running version. When a newer one exists it posts a notification with **Install and Relaunch**, **What’s New** and **Skip This Version** actions; if notifications are off, a small *Software Update* window appears instead. The window shows the release notes and drives the install: download with progress, Ed25519 signature check, `codesign --verify` of the extracted bundle, then the new `IslandBar.app` is swapped into place and the app relaunches itself. Right-click the pill for **Check for Updates…** (the item turns into *Update to IslandBar x.y.z…* once one is waiting); Settings has the automatic-check toggle and a **Check Now** button.
+
+Because signing is ad-hoc, macOS asks for System Audio Recording again after each update. In-place updates need the app to live in a writable folder and not be running from App Translocation (an unmoved download); in those cases the window offers the release page instead.
+
+### Cutting a release
+
+```bash
+Scripts/release.sh 0.2.0                # or: --notes CHANGELOG-entry.md, --dry-run
+```
+
+The script stamps `Resources/Info.plist`, commits `Release v0.2.0`, tags, builds, zips the bundle with `ditto`, signs the zip with the Ed25519 key in `~/.config/islandbar/update-signing.key` (`ISLANDBAR_SIGNING_KEY` overrides), pushes, and publishes the release with `IslandBar-0.2.0.zip` and `IslandBar-0.2.0.zip.sig` attached. Release notes default to one bullet per commit since the previous tag. The matching public key is compiled into `Sources/IslandBar/Updates/UpdateSignature.swift`; the script refuses a key that does not match it, and losing the private key means shipping a new public key by hand (`swift Tools/update-signing.swift keygen`). Back the key up.
+
+To exercise the updater without publishing: `ISLANDBAR_UPDATE_FEED_URL` points the checker at any GitHub-shaped `latest` JSON (a `file://` URL works, with `file://` asset URLs), `ISLANDBAR_UPDATE_CHECK_DELAY=3` shortens the launch delay, and `ISLANDBAR_UPDATE_AUTO_INSTALL=1` (only honoured together with a feed override) installs without asking. `ISLANDBAR_UPDATE_PUBLIC_KEY` swaps the verification key for the same purpose.
 
 ## Resilience
 

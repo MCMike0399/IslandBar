@@ -24,6 +24,14 @@ fi
 cp -R "$BUNDLE" "$CONTENTS/Resources/"
 
 cp "$ROOT/Resources/Info.plist" "$CONTENTS/Info.plist"
+# Scripts/release.sh stamps the release version; ISLANDBAR_VERSION/ISLANDBAR_BUILD let a
+# one-off build carry a different version (e.g. to exercise the updater locally).
+if [[ -n "${ISLANDBAR_VERSION:-}" ]]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $ISLANDBAR_VERSION" "$CONTENTS/Info.plist"
+fi
+if [[ -n "${ISLANDBAR_BUILD:-}" ]]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $ISLANDBAR_BUILD" "$CONTENTS/Info.plist"
+fi
 printf 'APPL????' > "$CONTENTS/PkgInfo"
 
 if ! otool -l "$CONTENTS/MacOS/IslandBar" | grep -q '@executable_path/../Frameworks'; then

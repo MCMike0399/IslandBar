@@ -32,6 +32,9 @@ final class Preferences {
     var analysisSource: AnalysisSource {
         didSet { UserDefaults.standard.set(analysisSource.rawValue, forKey: Keys.analysisSource) }
     }
+    var automaticUpdateChecks: Bool {
+        didSet { UserDefaults.standard.set(automaticUpdateChecks, forKey: Keys.automaticUpdateChecks) }
+    }
     var launchAtLogin: Bool {
         didSet {
             guard launchAtLogin != oldValue else { return }
@@ -63,11 +66,13 @@ final class Preferences {
         showPillBackground = d.object(forKey: Keys.showPillBackground) as? Bool ?? true
         let raw = d.string(forKey: Keys.analysisSource) ?? AnalysisSource.automatic.rawValue
         analysisSource = AnalysisSource(rawValue: raw) ?? .automatic
+        automaticUpdateChecks = d.object(forKey: Keys.automaticUpdateChecks) as? Bool ?? true
         launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 
     private enum Keys {
         static let showPillBackground = "showPillBackground"
         static let analysisSource = "analysisSource"
+        static let automaticUpdateChecks = "automaticUpdateChecks"
     }
 }

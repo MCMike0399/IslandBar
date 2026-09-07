@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var tapController: TapController!
     private var statusItem: StatusItemController!
     private var settings: SettingsWindowController!
+    private var updater: UpdateController!
     private let watchdog = RelaunchWatchdog()
     private var termSignal: DispatchSourceSignal?
     private var lastAppliedPlay = false
@@ -21,7 +22,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store = NowPlayingStore()
         let registry = AudioProcessRegistry()
         monitor = NowPlayingMonitor(store: store, registry: registry)
-        settings = SettingsWindowController(preferences: preferences)
+        updater = UpdateController(preferences: preferences)
+        settings = SettingsWindowController(preferences: preferences, updater: updater)
 
         let shared = SharedBarState()
         tapController = TapController(registry: registry, shared: shared) { [weak self] levels, _, _ in
@@ -45,10 +47,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DebugLog.line(message)
         }
 
-        statusItem = StatusItemController(store: store, preferences: preferences, settings: settings)
+        statusItem = StatusItemController(
+            store: store, preferences: preferences, settings: settings, updater: updater
+        )
         tapController.start()
         monitor.start()
         observeStore()
+        updater.start()
 
         DistributedNotificationCenter.default().addObserver(
             forName: IslandBarID.reopenNotification,
