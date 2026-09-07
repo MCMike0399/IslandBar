@@ -102,6 +102,7 @@ final class NowPlayingMonitor: MediaTransport {
     private var playingWork: DispatchWorkItem?
     private var restartAttempt = 0
     private var lastPaletteKey: String?
+    private var lastArtworkBase64: String?
 
     /// Playback state as MediaRemote last reported it, before any Core Audio override.
     private var reportedPlaying = false
@@ -177,6 +178,7 @@ final class NowPlayingMonitor: MediaTransport {
                 self.store.isPlaying = false
                 self.store.palette = .fallback
                 self.lastPaletteKey = nil
+                self.lastArtworkBase64 = nil
                 self.reportedPlaying = false
                 self.outputOverride = false
                 self.stopOutputPoll()
@@ -196,13 +198,22 @@ final class NowPlayingMonitor: MediaTransport {
             if let flag = payload.isPlaying { return flag }
             return (payload.playbackRate ?? 0) > 0
         }()
+        // Some events for the current track omit the artwork; keep the cover we have
+        // rather than blanking it (and the bar tint) until the next full event.
+        let artworkBase64: String? = {
+            if payload.artworkDataBase64 == nil, store.session?.paletteKey == key { return lastArtworkBase64 }
+            return payload.artworkDataBase64
+        }()
+        let artwork: NSImage? = payload.artwork
+            ?? (store.session?.paletteKey == key ? store.session?.artwork : nil)
+        lastArtworkBase64 = artworkBase64
         let next = Session(
             bundleID: payload.bundleIdentifier ?? "",
             pid: payload.PID ?? 0,
             title: payload.title ?? "",
             artist: payload.artist ?? "",
             appName: payload.applicationName ?? payload.bundleIdentifier ?? "Unknown",
-            artwork: payload.artwork,
+            artwork: artwork,
             paletteKey: key
         )
 
@@ -215,9 +226,15 @@ final class NowPlayingMonitor: MediaTransport {
                 "session bundle=\(next.bundleID) pid=\(next.pid) title=\(next.title) artist=\(next.artist) isPlaying=\(reported)"
             )
         }
-        if lastPaletteKey != key {
-            lastPaletteKey = key
+        // MediaRemote usually publishes the metadata first and the artwork in a later
+        // event, so the palette is keyed on the artwork bytes as well as the track: a
+        // fallback palette from an artwork-less first event is replaced as soon as the
+        // cover arrives, and a cover swap on the same track re-tints the bars.
+        let paletteKey = key + "\u{1e}" + (artworkBase64.map { String($0.count) + $0.suffix(64) } ?? "")
+        if lastPaletteKey != paletteKey {
+            lastPaletteKey = paletteKey
             store.palette = ArtworkPalette.make(from: next.artwork)
+            DebugLog.line("palette rebuilt artwork=\(next.artwork != nil) key=\(key)")
         }
 
         reportedPlaying = reported
