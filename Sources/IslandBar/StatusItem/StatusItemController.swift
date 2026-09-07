@@ -13,6 +13,7 @@ final class StatusItemController: NSObject {
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private var hosting: PassthroughHostingView<AnyView>?
+    private var hostedHeight: CGFloat = 0
     private let settings: SettingsWindowController
     /// Accessory apps do not reliably get transient popovers dismissed by clicks in
     /// other apps, so watch for clicks ourselves while the popover is up.
@@ -33,12 +34,16 @@ final class StatusItemController: NSObject {
         button.action = #selector(handleClick(_:))
 
         let height = max(button.bounds.height, 22)
+        hostedHeight = height
         let root = AnyView(
             CompactIslandView(buttonHeight: height)
                 .environment(store)
                 .environment(preferences)
         )
         let view = PassthroughHostingView(rootView: root)
+        // The pill has a fixed size. Without this, NSHostingView re-runs
+        // updateConstraints/layout for the whole button on every animation frame.
+        view.sizingOptions = []
         view.translatesAutoresizingMaskIntoConstraints = false
         button.addSubview(view)
         NSLayoutConstraint.activate([
@@ -53,11 +58,7 @@ final class StatusItemController: NSObject {
         popover.behavior = .transient
         popover.delegate = self
         popover.contentSize = ExpandedIslandMetrics.size
-        popover.contentViewController = NSHostingController(
-            rootView: ExpandedIslandView()
-                .environment(store)
-                .environment(preferences)
-        )
+        popover.contentViewController = makeExpandedController()
 
         startObserving()
     }
@@ -90,8 +91,12 @@ final class StatusItemController: NSObject {
             statusItem.isVisible = true
             DebugLog.line("statusItem.isVisible=true")
         }
+        // The hosted view observes the store itself; replacing the root view here
+        // on every Now Playing update forced a constraints + layout pass each time.
         if let hosting, let button = statusItem.button {
             let height = max(button.bounds.height, 22)
+            guard height != hostedHeight else { return }
+            hostedHeight = height
             hosting.rootView = AnyView(
                 CompactIslandView(buttonHeight: height)
                     .environment(store)
@@ -114,14 +119,23 @@ final class StatusItemController: NSObject {
         if popover.isShown {
             closePopoverIfShown()
         } else {
-            popover.contentViewController = NSHostingController(
-                rootView: ExpandedIslandView()
-                    .environment(store)
-                    .environment(preferences)
-            )
+            popover.contentViewController = makeExpandedController()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             installClickAwayMonitors()
         }
+    }
+
+    /// The card has a fixed size. Without clearing `sizingOptions` the hosting view
+    /// re-measures the popover frame on every bar frame while the popover is open.
+    private func makeExpandedController() -> NSHostingController<some View> {
+        let controller = NSHostingController(
+            rootView: ExpandedIslandView()
+                .environment(store)
+                .environment(preferences)
+        )
+        controller.sizingOptions = []
+        controller.view.frame = NSRect(origin: .zero, size: ExpandedIslandMetrics.size)
+        return controller
     }
 
     private func installClickAwayMonitors() {

@@ -38,10 +38,32 @@ struct Session {
 final class NowPlayingStore {
     var session: Session?
     var isPlaying = false
-    var barLevels = BarLevels.rest
     var palette = ArtworkPalette.fallback
     var audioPermissionDenied = false
     var usingProcedural = false
+
+    /// Latest eased bar heights, published at `BarLevelPump.frameRate`. Deliberately
+    /// outside observation: at 60 Hz a tracked property would re-run every SwiftUI
+    /// body that touches it. Bar views subscribe with `addLevelObserver` instead.
+    @ObservationIgnored
+    var barLevels = BarLevels.rest {
+        didSet {
+            for observer in levelObservers.values { observer(barLevels) }
+        }
+    }
+
+    @ObservationIgnored
+    private var levelObservers: [UUID: (BarLevels) -> Void] = [:]
+
+    func addLevelObserver(_ observer: @escaping (BarLevels) -> Void) -> UUID {
+        let id = UUID()
+        levelObservers[id] = observer
+        return id
+    }
+
+    func removeLevelObserver(_ id: UUID) {
+        levelObservers[id] = nil
+    }
 
     @ObservationIgnored
     var transport: MediaTransport?

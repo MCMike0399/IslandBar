@@ -33,16 +33,8 @@ struct ExpandedIslandView: View {
                         .padding(.vertical, 2)
                         .background(.white.opacity(0.12), in: Capsule())
                         .frame(height: 18, alignment: .leading)
-                    IslandBarsView(
-                        levels: store.isPlaying ? store.barLevels : .rest,
-                        flat: !store.isPlaying,
-                        palette: store.palette,
-                        barWidth: 5,
-                        gap: 3,
-                        minHeight: 4,
-                        maxHeight: 24
-                    )
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    ExpandedBars()
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     HStack(spacing: 22) {
                         transportButton("backward.end.fill") { store.previousTrack() }
                         transportButton(store.isPlaying ? "pause.fill" : "play.fill") { store.togglePlayPause() }
@@ -60,6 +52,20 @@ struct ExpandedIslandView: View {
         .frame(width: ExpandedIslandMetrics.width, height: ExpandedIslandMetrics.height)
         .clipped()
         .environment(\.colorScheme, .dark)
+    }
+
+    private struct ExpandedBars: View {
+        @Environment(NowPlayingStore.self) private var store
+
+        var body: some View {
+            IslandBarsView(
+                flat: !store.isPlaying,
+                animating: store.isPlaying && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+                palette: store.palette,
+                metrics: BarMetrics(barWidth: 5, gap: 3, minHeight: 4, maxHeight: 24),
+                glow: true
+            )
+        }
     }
 
     private var displayTitle: String {

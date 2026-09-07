@@ -16,8 +16,11 @@ final class SpectrumAnalyzer: @unchecked Sendable {
     private var imagp: [Float]
     private var outReal: [Float]
     private var outImag: [Float]
-    private var hopScratch: [Float]
+    private var magnitudes: [Float]
     private var setup: OpaquePointer?
+    /// Half-open FFT bin ranges per band, rebuilt when the sample rate changes.
+    private var bandBins: [(lo: Int, hi: Int)] = []
+    private var bandBinsRate: Double = 0
     private var envelope: [Float] = BarLevels.rest.values
     /// Per-band running mean (dB) and mean absolute deviation (dB). Bars are
     /// drawn relative to these, so steady loud content sits mid-height and only
@@ -44,7 +47,7 @@ final class SpectrumAnalyzer: @unchecked Sendable {
         imagp = [Float](repeating: 0, count: n / 2)
         outReal = [Float](repeating: 0, count: n / 2)
         outImag = [Float](repeating: 0, count: n / 2)
-        hopScratch = [Float](repeating: 0, count: hop)
+        magnitudes = [Float](repeating: 0, count: n / 2)
         window.withUnsafeMutableBufferPointer { buf in
             vDSP_hann_window(buf.baseAddress!, vDSP_Length(n), Int32(vDSP_HANN_NORM))
         }
@@ -64,8 +67,10 @@ final class SpectrumAnalyzer: @unchecked Sendable {
         // Statistics deliberately survive stop/start: a resumed track has the same
         // loudness it had before the pause, so there is nothing to relearn.
         warmupFrames = Self.warmupLength
+        // Each tick drains everything the IO proc has queued, so the period only sets
+        // latency; 15 ms is well inside the 85 ms ring at 48 kHz.
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(10))
+        timer.schedule(deadline: .now(), repeating: .milliseconds(15), leeway: .milliseconds(3))
         timer.setEventHandler { [weak self] in
             self?.tick()
         }
@@ -79,23 +84,34 @@ final class SpectrumAnalyzer: @unchecked Sendable {
     }
 
     private func tick() {
-        let got = hopScratch.withUnsafeMutableBufferPointer { buf -> Int in
-            ring.read(buf.baseAddress!, maxCount: hop)
-        }
-        guard got > 0 else { return }
-        for i in 0..<got {
-            if filled < n {
-                frame[filled] = hopScratch[i]
-                filled += 1
+        while true {
+            let want = n - filled
+            let got = frame.withUnsafeMutableBufferPointer { buf -> Int in
+                ring.read(buf.baseAddress! + filled, maxCount: want)
             }
+            filled += got
+            guard filled >= n else { return }
+            analyzeFrame()
+            let keep = n - hop
+            frame.withUnsafeMutableBufferPointer { buf in
+                let base = buf.baseAddress!
+                base.update(from: base + hop, count: keep)
+            }
+            filled = keep
         }
-        guard filled >= n else { return }
-        analyzeFrame()
-        let keep = n - hop
-        for i in 0..<keep {
-            frame[i] = frame[i + hop]
+    }
+
+    private func rebuildBandsIfNeeded() {
+        guard bandBinsRate != sampleRate else { return }
+        bandBinsRate = sampleRate
+        // Roughly log-spaced edges; sub-bass to air across the eight bars.
+        let edges: [Double] = [40, 90, 200, 450, 1_000, 2_200, 5_000, 9_000, 14_000]
+        let binHz = sampleRate / Double(n)
+        bandBins = (0..<bandCount).map { band in
+            let lo = max(1, Int((edges[band] / binHz).rounded(.up)))
+            let hi = min(n / 2, Int((edges[band + 1] / binHz).rounded(.up)))
+            return (lo: lo, hi: max(lo, hi))
         }
-        filled = keep
     }
 
     private var windowed = [Float](repeating: 0, count: 1024)
@@ -129,26 +145,24 @@ final class SpectrumAnalyzer: @unchecked Sendable {
             }
         }
 
-        let nyquist = sampleRate / 2
-        // Roughly log-spaced edges; sub-bass to air across the eight bars.
-        let edges: [Double] = [40, 90, 200, 450, 1_000, 2_200, 5_000, 9_000, 14_000]
-        let bands = (0..<bandCount).map { (edges[$0], edges[$0 + 1]) }
-        var db = [Float](repeating: -120, count: bandCount)
-        for (band, range) in bands.enumerated() {
-            let lo = range.0
-            let hi = min(range.1, nyquist)
-            var sum: Float = 0
-            var count: Float = 0
-            for k in 1..<(n / 2) {
-                let freq = Double(k) * sampleRate / Double(n)
-                if freq >= lo && freq < hi {
-                    let mag = hypot(outReal[k], outImag[k])
-                    sum += mag
-                    count += 1
-                }
+        outReal.withUnsafeMutableBufferPointer { or in
+            outImag.withUnsafeMutableBufferPointer { oi in
+                var split = DSPSplitComplex(realp: or.baseAddress!, imagp: oi.baseAddress!)
+                vDSP_zvabs(&split, 1, &magnitudes, 1, vDSP_Length(n / 2))
             }
-            let mean = count > 0 ? sum / count : 0
-            db[band] = 20 * log10(max(mean, 1e-12))
+        }
+
+        rebuildBandsIfNeeded()
+        var db = [Float](repeating: -120, count: bandCount)
+        magnitudes.withUnsafeBufferPointer { mags in
+            for (band, bins) in bandBins.enumerated() {
+                let count = bins.hi - bins.lo
+                var mean: Float = 0
+                if count > 0 {
+                    vDSP_meanv(mags.baseAddress! + bins.lo, 1, &mean, vDSP_Length(count))
+                }
+                db[band] = 20 * log10(max(mean, 1e-12))
+            }
         }
 
         // ~94 analysis frames/s at 48 kHz (hop 512). Mean follows over ~1 s,

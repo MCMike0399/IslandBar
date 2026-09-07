@@ -71,6 +71,10 @@ final class AudioProcessRegistry: @unchecked Sendable {
     private var defaultOutputListener: AudioObjectPropertyListenerBlock?
     var onProcessListChange: (@Sendable () -> Void)?
     var onDefaultOutputChange: (@Sendable () -> Void)?
+    /// Bundle IDs by (object ID, pid). Each lookup is a string round-trip to
+    /// coreaudiod and the answer never changes while the process lives.
+    private let bundleCacheLock = NSLock()
+    private var bundleCache: [AudioObjectID: (pid: pid_t, bundleID: String)] = [:]
 
     func start() {
         queue.async { [weak self] in
@@ -89,13 +93,26 @@ final class AudioProcessRegistry: @unchecked Sendable {
             object: CoreAudioProps.systemObject,
             selector: kAudioHardwarePropertyProcessObjectList
         )
+        let live = Set(ids)
         return ids.compactMap { id in
             guard id != CoreAudioProps.unknown else { return nil }
             let pid: pid_t = CoreAudioProps.get(object: id, selector: kAudioProcessPropertyPID) ?? 0
-            let bundle = CoreAudioProps.getString(object: id, selector: kAudioProcessPropertyBundleID) ?? ""
+            let bundle = bundleID(for: id, pid: pid, live: live)
             let running: UInt32 = CoreAudioProps.get(object: id, selector: kAudioProcessPropertyIsRunningOutput) ?? 0
             return AudioProcessInfo(objectID: id, pid: pid, bundleID: bundle, isRunningOutput: running != 0)
         }
+    }
+
+    private func bundleID(for id: AudioObjectID, pid: pid_t, live: Set<AudioObjectID>) -> String {
+        bundleCacheLock.lock()
+        defer { bundleCacheLock.unlock() }
+        if let cached = bundleCache[id], cached.pid == pid {
+            return cached.bundleID
+        }
+        let bundle = CoreAudioProps.getString(object: id, selector: kAudioProcessPropertyBundleID) ?? ""
+        bundleCache = bundleCache.filter { live.contains($0.key) }
+        bundleCache[id] = (pid: pid, bundleID: bundle)
+        return bundle
     }
 
     /// True when `process` belongs to the app that owns `session`: same pid, same bundle ID,

@@ -2,10 +2,9 @@ import AppKit
 import SwiftUI
 
 enum CompactIslandMetrics {
-    static let barWidth: CGFloat = 2.5
-    static let gap: CGFloat = 2
+    static let bars = BarMetrics(barWidth: 2.5, gap: 2, minHeight: 2.5, maxHeight: 14)
     /// Bars only, no artwork: N bars + (N-1) gaps, plus 8 pt insets each side.
-    static let pillWidth: CGFloat = CGFloat(BarLevels.count) * barWidth + CGFloat(BarLevels.count - 1) * gap + 16
+    static let pillWidth: CGFloat = bars.totalWidth + 16
     static let pillHeight: CGFloat = 18
 }
 
@@ -16,27 +15,22 @@ struct CompactIslandView: View {
 
     var body: some View {
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let playing = store.isPlaying && !reduceMotion
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !playing)) { _ in
-            let levels = (playing ? store.barLevels : .rest)
-            ZStack {
-                if preferences.showPillBackground {
-                    Capsule()
-                        .fill(Color.black.opacity(0.92))
-                }
-                IslandBarsView(
-                    levels: levels,
-                    flat: !store.isPlaying,
-                    palette: store.palette,
-                    barWidth: CompactIslandMetrics.barWidth,
-                    gap: CompactIslandMetrics.gap,
-                    minHeight: 2.5,
-                    maxHeight: 14
-                )
+        // This body only runs on the rare changes below (play state, palette,
+        // background toggle); level frames go straight to the layer view.
+        ZStack {
+            if preferences.showPillBackground {
+                Capsule()
+                    .fill(Color.black.opacity(0.92))
             }
-            .frame(width: CompactIslandMetrics.pillWidth, height: CompactIslandMetrics.pillHeight)
-            .frame(width: CompactIslandMetrics.pillWidth, height: buttonHeight, alignment: .center)
+            IslandBarsView(
+                flat: !store.isPlaying,
+                animating: store.isPlaying && !reduceMotion,
+                palette: store.palette,
+                metrics: CompactIslandMetrics.bars
+            )
         }
+        .frame(width: CompactIslandMetrics.pillWidth, height: CompactIslandMetrics.pillHeight)
+        .frame(width: CompactIslandMetrics.pillWidth, height: buttonHeight, alignment: .center)
         .environment(\.colorScheme, .dark)
     }
 }

@@ -198,7 +198,7 @@ enum TapPhase: String, Sendable {
     case idle
 }
 
-/// Owns target selection, tap lifetime, procedural fallback, and the 30 Hz bar pump.
+/// Owns target selection, tap lifetime, procedural fallback, and the bar pump.
 final class TapController: @unchecked Sendable {
     private let queue = DispatchQueue(label: "dev.burbuja-lab.islandbar.tap")
     private let registry: AudioProcessRegistry
@@ -302,19 +302,29 @@ final class TapController: @unchecked Sendable {
 
         stopWork?.cancel()
         stopWork = nil
-        pump.start()
-        if playChanged || sessionChanged || phase == .idle {
+        if !pump.isRunning { pump.start() }
+        if playChanged || phase == .idle {
             silenceSince = nil
             allOutputSince = nil
             phase = .idle
-            selectAndStart(reason: sessionChanged ? "session-change" : "playing")
+            selectAndStart(reason: "playing")
+        } else if sessionChanged {
+            // A track change inside the same app usually keeps the same target
+            // processes; leave a matched tap running and let selectAndStart restart
+            // only if the targets really differ. Anything else gets a fresh match.
+            silenceSince = nil
+            allOutputSince = nil
+            if phase != .matched { phase = .idle }
+            selectAndStart(reason: "session-change")
         }
     }
 
     private func handleProcessListChange() {
         guard isPlaying, session != nil else { return }
         if phase != .matched {
-            selectAndStart(reason: "process-list")
+            // Chromium spawns and retires audio helpers in bursts; coalesce them so
+            // the aggregate device is not rebuilt for every intermediate list.
+            scheduleReselect(after: 0.5)
         }
     }
 
@@ -348,7 +358,7 @@ final class TapController: @unchecked Sendable {
             enterProcedural(reason: reason)
             return
         case .allSystemOutput:
-            targets = processes.filter { $0.isRunningOutput && $0.pid != selfPID }.map(\.objectID)
+            targets = Self.outputTargets(processes, excluding: selfPID)
             nextPhase = .allOutput
         case .automatic:
             if phase == .procedural {
@@ -358,11 +368,11 @@ final class TapController: @unchecked Sendable {
                     nextPhase = .matched
                     silenceSince = silent ? (silenceSince ?? now) : nil
                 } else {
-                    targets = processes.filter { $0.isRunningOutput && $0.pid != selfPID }.map(\.objectID)
+                    targets = Self.outputTargets(processes, excluding: selfPID)
                     nextPhase = .allOutput
                 }
             } else if matched.isEmpty {
-                targets = processes.filter { $0.isRunningOutput && $0.pid != selfPID }.map(\.objectID)
+                targets = Self.outputTargets(processes, excluding: selfPID)
                 nextPhase = .allOutput
                 allOutputSince = allOutputSince ?? now
             } else if phase == .allOutput {
@@ -371,7 +381,7 @@ final class TapController: @unchecked Sendable {
                     scheduleReselect(after: 5)
                     return
                 }
-                targets = processes.filter { $0.isRunningOutput && $0.pid != selfPID }.map(\.objectID)
+                targets = Self.outputTargets(processes, excluding: selfPID)
                 nextPhase = .allOutput
             } else {
                 if silent {
@@ -379,8 +389,10 @@ final class TapController: @unchecked Sendable {
                 } else {
                     silenceSince = nil
                 }
-                if let since = silenceSince, now - since >= 1.5 {
-                    targets = processes.filter { $0.isRunningOutput && $0.pid != selfPID }.map(\.objectID)
+                // Quiet scenes and gaps between episodes easily last a couple of seconds;
+                // switching to all-output too eagerly rebuilds the aggregate device.
+                if let since = silenceSince, now - since >= 4 {
+                    targets = Self.outputTargets(processes, excluding: selfPID)
                     nextPhase = .allOutput
                     allOutputSince = now
                 } else {
@@ -397,7 +409,9 @@ final class TapController: @unchecked Sendable {
         }
 
         if nextPhase == phase, targets == lastTargetIDs, tap.isRunning {
-            scheduleReselect(after: 1.5)
+            // Each poll walks every audio process object through coreaudiod; a healthy
+            // matched tap only needs to notice silence, which now takes 4 s anyway.
+            scheduleReselect(after: nextPhase == .matched ? 3 : 1.5)
             return
         }
 
@@ -447,7 +461,7 @@ final class TapController: @unchecked Sendable {
         lastTargetIDs = []
         phase = .procedural
         procedural.start()
-        pump.start()
+        if !pump.isRunning { pump.start() }
         onUsingProcedural?(true)
         DebugLog.line("procedural driver active reason=\(reason)")
         onTapEvent?("procedural reason=\(reason)")
@@ -490,6 +504,10 @@ final class TapController: @unchecked Sendable {
         selectWork = nil
     }
 
+    /// Target lists are always sorted: `selectAndStart` compares them against the
+    /// running tap's targets to decide whether to leave it alone. An unordered list
+    /// made that check fail on almost every poll, and every rebuild of the aggregate
+    /// device made coreaudiod reconfigure the output and glitch all audio.
     private static func matchTargets(
         session: NowPlayingSession,
         processes: [AudioProcessInfo],
@@ -502,6 +520,13 @@ final class TapController: @unchecked Sendable {
         for proc in processes where AudioProcessRegistry.matches(session: session, process: proc) {
             ids.insert(proc.objectID)
         }
-        return Array(ids)
+        return ids.sorted()
+    }
+
+    private static func outputTargets(_ processes: [AudioProcessInfo], excluding selfPID: pid_t) -> [AudioObjectID] {
+        processes
+            .filter { $0.isRunningOutput && $0.pid != selfPID }
+            .map(\.objectID)
+            .sorted()
     }
 }

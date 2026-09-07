@@ -25,7 +25,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let shared = SharedBarState()
         tapController = TapController(registry: registry, shared: shared) { [weak self] levels, _, _ in
-            Task { @MainActor in
+            // The pump already fires on the main queue; skip the actor hop on every frame.
+            MainActor.assumeIsolated {
                 guard let self, self.store.isPlaying else { return }
                 self.store.barLevels = levels
             }
@@ -106,9 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 lastAppliedSession = session
                 lastAppliedPlay = playing
                 if !playing {
-                    withAnimation(.easeOut(duration: 0.4)) {
-                        store.barLevels = .rest
-                    }
+                    store.barLevels = .rest
                 }
                 tapController.apply(session: session, isPlaying: playing, preferences: prefs)
             } else {

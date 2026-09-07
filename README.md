@@ -31,7 +31,7 @@ ISLANDBAR_DEBUG=1 dist/IslandBar.app/Contents/MacOS/IslandBar
 
 ## Usage
 
-Left-click the pill to expand (artwork, title, transport). Right-click for Launch at Login, Settings, and Quit. The pill is always visible: while nothing is playing the bars collapse to a flat line tinted with the last artwork palette.
+Left-click the pill to expand (artwork, title, transport). Right-click for Launch at Login, Settings, and Quit. The pill is always visible: while nothing is playing the bars collapse to a flat gray line.
 
 Bar colours come from the artwork: pixels are clustered in Oklab (k-means, plus a separate pass over the colourful pixels so a small accent on a dark cover is not averaged away) and the four most distinct dominant colours are ordered by hue and interpolated into a gradient across the eight bars. Only lightness is lifted for legibility on the black pill, so hues stay true and greyscale art gives grey bars.
 
