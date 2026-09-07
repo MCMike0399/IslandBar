@@ -47,7 +47,7 @@ func getString(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector)
     return unmanaged.takeRetainedValue() as String
 }
 
-let ids: [AudioObjectID] = getArray(kAudioObjectSystemObject, kAudioHardwarePropertyProcessObjectList)
+let ids: [AudioObjectID] = getArray(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyProcessObjectList)
 print("process objects: \(ids.count)")
 for id in ids {
     let pid: pid_t = get(id, kAudioProcessPropertyPID) ?? 0

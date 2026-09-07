@@ -19,8 +19,19 @@ final class SpectrumAnalyzer: @unchecked Sendable {
     private var hopScratch: [Float]
     private var setup: OpaquePointer?
     private var envelope: [Float] = BarLevels.rest.values
-    private var peak: [Float] = [-20, -20, -20, -20]
-    private var floorDb: [Float] = [-70, -70, -70, -70]
+    /// Per-band running mean (dB) and mean absolute deviation (dB). Bars are
+    /// drawn relative to these, so steady loud content sits mid-height and only
+    /// transients (beats, hits) reach the top. The old floor/peak AGC pinned
+    /// everything near 1.0 because music rarely returns to its quietest frame.
+    private let bandCount = BarLevels.count
+    private var meanDb: [Float] = [Float](repeating: 0, count: BarLevels.count)
+    private var devDb: [Float] = [Float](repeating: 6, count: BarLevels.count)
+    private var primed = false
+    /// Frames left in the fast-adapting phase after (re)start. Resuming after a pause
+    /// used to pin every bar at 1.0 for seconds: the statistics primed on the fade-in
+    /// or on silence and then crawled up to the real level at the slow rate.
+    private var warmupFrames = 0
+    private static let warmupLength = 90
 
     var sampleRate: Double = 48_000
 
@@ -50,6 +61,9 @@ final class SpectrumAnalyzer: @unchecked Sendable {
         stop()
         filled = 0
         envelope = BarLevels.rest.values
+        // Statistics deliberately survive stop/start: a resumed track has the same
+        // loudness it had before the pause, so there is nothing to relearn.
+        warmupFrames = Self.warmupLength
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: .milliseconds(10))
         timer.setEventHandler { [weak self] in
@@ -116,8 +130,10 @@ final class SpectrumAnalyzer: @unchecked Sendable {
         }
 
         let nyquist = sampleRate / 2
-        let bands: [(Double, Double)] = [(40, 200), (200, 800), (800, 3_000), (3_000, 12_000)]
-        var db = [Float](repeating: -120, count: 4)
+        // Roughly log-spaced edges; sub-bass to air across the eight bars.
+        let edges: [Double] = [40, 90, 200, 450, 1_000, 2_200, 5_000, 9_000, 14_000]
+        let bands = (0..<bandCount).map { (edges[$0], edges[$0 + 1]) }
+        var db = [Float](repeating: -120, count: bandCount)
         for (band, range) in bands.enumerated() {
             let lo = range.0
             let hi = min(range.1, nyquist)
@@ -135,37 +151,68 @@ final class SpectrumAnalyzer: @unchecked Sendable {
             db[band] = 20 * log10(max(mean, 1e-12))
         }
 
-        let peakDecay = powf(0.5, 1.0 / 90.0)
-        var normalized = [Float](repeating: 0, count: 4)
-        for i in 0..<4 {
-            if db[i] > peak[i] {
-                peak[i] = db[i]
-            } else {
-                peak[i] = peak[i] * peakDecay + db[i] * (1 - peakDecay)
+        // ~94 analysis frames/s at 48 kHz (hop 512). Mean follows over ~1 s,
+        // deviation over ~2 s, so a 4-on-the-floor kick stays a transient.
+        // Silence and fade-ins carry no loudness information: never prime on them,
+        // and do not let them drag the mean down while we wait for real signal.
+        let informative = rmsDb > -50
+        if !primed {
+            guard informative else {
+                publishQuiet(rmsDb: rmsDb)
+                return
             }
-            if db[i] < floorDb[i] {
-                floorDb[i] = db[i]
-            } else {
-                floorDb[i] = floorDb[i] * 0.995 + db[i] * 0.005
+            primed = true
+            for i in 0..<bandCount {
+                meanDb[i] = db[i]
+                devDb[i] = 6
             }
-            let span = max(6, peak[i] - floorDb[i])
-            normalized[i] = (db[i] - floorDb[i]) / span
-            normalized[i] = min(1, max(0, normalized[i]))
+        }
+        let warm = warmupFrames > 0
+        if warm && informative { warmupFrames -= 1 }
+        let meanAlpha: Float = warm ? 0.06 : 0.012
+        let devAlpha: Float = warm ? 0.03 : 0.006
+        var normalized = [Float](repeating: 0, count: bandCount)
+        for i in 0..<bandCount {
+            let delta = db[i] - meanDb[i]
+            if informative {
+                meanDb[i] += delta * meanAlpha
+                devDb[i] += (abs(delta) - devDb[i]) * devAlpha
+            }
+            // Map ±2.2 deviations onto 0…1 around 0.5. Clamp the scale so a
+            // near-constant tone still has a little life and a chaotic band
+            // does not become a strobe.
+            let scale = min(14, max(3.5, devDb[i] * 2.2))
+            var x = 0.5 + delta / (2 * scale)
+            // Gentle curve: keeps the mid-range around 0.45 and lets peaks pop.
+            x = min(1, max(0, x))
+            normalized[i] = powf(x, 1.15)
         }
 
+        // Very quiet material should not dance at half height.
         if rmsDb < -60 {
-            normalized = [0.12, 0.12, 0.12, 0.12]
+            normalized = [Float](repeating: 0.12, count: bandCount)
+        } else if rmsDb < -40 {
+            let k = (rmsDb + 60) / 20
+            for i in 0..<bandCount { normalized[i] = 0.12 + (normalized[i] - 0.12) * k }
         }
 
-        for i in 0..<4 {
+        for i in 0..<bandCount {
             envelope[i] = envelopeStep(current: envelope[i], target: normalized[i])
+        }
+        let published = BarLevels(values: envelope).clampedPlaying().values
+        shared.publish(bars: published, rmsDb: rmsDb, fromTap: true)
+    }
+
+    private func publishQuiet(rmsDb: Float) {
+        for i in 0..<bandCount {
+            envelope[i] = envelopeStep(current: envelope[i], target: 0.12)
         }
         let published = BarLevels(values: envelope).clampedPlaying().values
         shared.publish(bars: published, rmsDb: rmsDb, fromTap: true)
     }
 }
 
-func envelopeStep(current: Float, target: Float, attack: Float = 0.55, release: Float = 0.10) -> Float {
+func envelopeStep(current: Float, target: Float, attack: Float = 0.42, release: Float = 0.085) -> Float {
     if target > current {
         return current + (target - current) * attack
     }

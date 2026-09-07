@@ -3,8 +3,9 @@ import Foundation
 struct BarLevels: Equatable, Sendable {
     var values: [Float]
 
-    static let rest = BarLevels(values: [0.30, 0.45, 0.30, 0.45])
-    static let count = 4
+    /// Number of bars everywhere: analyzer bands, procedural motion, palette entries, views.
+    static let count = 8
+    static let rest = BarLevels(values: (0..<count).map { $0 % 2 == 0 ? 0.30 : 0.45 })
 
     init(values: [Float]) {
         if values.count == Self.count {

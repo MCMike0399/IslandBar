@@ -6,12 +6,13 @@ final class ProceduralDriver: @unchecked Sendable {
     private let queue = DispatchQueue(label: "dev.burbuja-lab.islandbar.procedural")
     private var t: Double = 0
     private var envelope: [Float] = BarLevels.rest.values
-    private let phases: [(f1: Double, f2: Double, p: Double)] = [
-        (0.90, 1.70, 0.0),
-        (1.10, 1.90, 0.7),
-        (1.40, 2.10, 1.4),
-        (1.60, 2.40, 2.1),
-    ]
+    private let phases: [(f1: Double, f2: Double, p: Double)] = (0..<BarLevels.count).map { (i: Int) -> (f1: Double, f2: Double, p: Double) in
+        let k = Double(i)
+        let f1: Double = 0.90 + 0.12 * k
+        let f2: Double = 1.70 + 0.11 * k
+        let p: Double = 0.7 * k
+        return (f1: f1, f2: f2, p: p)
+    }
 
     init(shared: SharedBarState) {
         self.shared = shared
@@ -35,8 +36,8 @@ final class ProceduralDriver: @unchecked Sendable {
     }
 
     private func tick() {
-        var target = [Float](repeating: 0, count: 4)
-        for i in 0..<4 {
+        var target = [Float](repeating: 0, count: BarLevels.count)
+        for i in 0..<BarLevels.count {
             let p = phases[i]
             let raw = 0.52
                 + 0.28 * sin(2 * Double.pi * p.f1 * t + p.p)

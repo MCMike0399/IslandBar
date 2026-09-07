@@ -8,7 +8,6 @@ struct SettingsView: View {
         Form {
             Toggle("Launch at Login", isOn: $preferences.launchAtLogin)
             Toggle("Show island pill background", isOn: $preferences.showPillBackground)
-            Toggle("Hide when paused", isOn: $preferences.hideWhenPaused)
             Picker("Analysis source", selection: $preferences.analysisSource) {
                 ForEach(AnalysisSource.allCases) { source in
                     Text(source.title).tag(source)
@@ -16,7 +15,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 360, height: 220)
+        .frame(width: 360, height: 190)
         .padding(.bottom, 8)
     }
 }

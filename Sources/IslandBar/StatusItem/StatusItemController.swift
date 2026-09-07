@@ -14,6 +14,9 @@ final class StatusItemController: NSObject {
     private let popover = NSPopover()
     private var hosting: PassthroughHostingView<AnyView>?
     private let settings: SettingsWindowController
+    /// Accessory apps do not reliably get transient popovers dismissed by clicks in
+    /// other apps, so watch for clicks ourselves while the popover is up.
+    private var clickAwayMonitors: [Any] = []
 
     init(store: NowPlayingStore, preferences: Preferences, settings: SettingsWindowController) {
         self.store = store
@@ -43,12 +46,13 @@ final class StatusItemController: NSObject {
             view.trailingAnchor.constraint(equalTo: button.trailingAnchor),
             view.topAnchor.constraint(equalTo: button.topAnchor),
             view.bottomAnchor.constraint(equalTo: button.bottomAnchor),
-            view.widthAnchor.constraint(equalToConstant: 62),
+            view.widthAnchor.constraint(equalToConstant: CompactIslandMetrics.pillWidth),
         ])
         hosting = view
 
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 280, height: 120)
+        popover.delegate = self
+        popover.contentSize = ExpandedIslandMetrics.size
         popover.contentViewController = NSHostingController(
             rootView: ExpandedIslandView()
                 .environment(store)
@@ -58,17 +62,10 @@ final class StatusItemController: NSObject {
         startObserving()
     }
 
+    /// The status item is persistent now; a relaunch attempt just brings the
+    /// existing instance forward, so there is nothing to reveal.
     func showReopenSafety() {
-        store.reopenVisibleUntil = Date().addingTimeInterval(8)
-        applyVisibility()
-        DebugLog.line("reopen safety: statusItem visible for 8s")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
-            guard let self else { return }
-            if let until = self.store.reopenVisibleUntil, until <= Date() {
-                self.store.reopenVisibleUntil = nil
-                self.applyVisibility()
-            }
-        }
+        DebugLog.line("reopen requested; status item is always visible")
     }
 
     private func startObserving() {
@@ -88,20 +85,10 @@ final class StatusItemController: NSObject {
     }
 
     func applyVisibility() {
-        let reopen = (store.reopenVisibleUntil ?? .distantPast) > Date()
-        let visible: Bool
-        if reopen {
-            visible = true
-        } else if store.session == nil {
-            visible = false
-        } else if preferences.hideWhenPaused && !store.isPlaying {
-            visible = false
-        } else {
-            visible = true
-        }
-        if statusItem.isVisible != visible {
-            statusItem.isVisible = visible
-            DebugLog.line("statusItem.isVisible=\(visible)")
+        // Persistent pill: always visible. When nothing plays the bars collapse to a flat line.
+        if !statusItem.isVisible {
+            statusItem.isVisible = true
+            DebugLog.line("statusItem.isVisible=true")
         }
         if let hosting, let button = statusItem.button {
             let height = max(button.bounds.height, 22)
@@ -125,7 +112,7 @@ final class StatusItemController: NSObject {
     private func togglePopover() {
         guard let button = statusItem.button else { return }
         if popover.isShown {
-            popover.performClose(nil)
+            closePopoverIfShown()
         } else {
             popover.contentViewController = NSHostingController(
                 rootView: ExpandedIslandView()
@@ -133,6 +120,43 @@ final class StatusItemController: NSObject {
                     .environment(preferences)
             )
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            installClickAwayMonitors()
+        }
+    }
+
+    private func installClickAwayMonitors() {
+        removeClickAwayMonitors()
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] _ in
+            Task { @MainActor in self?.closePopoverIfShown() }
+        }) {
+            clickAwayMonitors.append(global)
+        }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { [weak self] event in
+            guard let self else { return event }
+            let popoverWindow = self.popover.contentViewController?.view.window
+            let inPopover = event.window != nil && event.window == popoverWindow
+            let onButton = event.window != nil && event.window == self.statusItem.button?.window
+            if !inPopover && !onButton {
+                Task { @MainActor in self.closePopoverIfShown() }
+            }
+            return event
+        }) {
+            clickAwayMonitors.append(local)
+        }
+    }
+
+    private func removeClickAwayMonitors() {
+        for monitor in clickAwayMonitors {
+            NSEvent.removeMonitor(monitor)
+        }
+        clickAwayMonitors.removeAll()
+    }
+
+    private func closePopoverIfShown() {
+        removeClickAwayMonitors()
+        if popover.isShown {
+            popover.performClose(nil)
         }
     }
 
@@ -182,5 +206,11 @@ final class StatusItemController: NSObject {
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+}
+
+extension StatusItemController: NSPopoverDelegate {
+    func popoverDidClose(_ notification: Notification) {
+        removeClickAwayMonitors()
     }
 }

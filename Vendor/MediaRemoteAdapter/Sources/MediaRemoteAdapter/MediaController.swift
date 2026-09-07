@@ -25,6 +25,12 @@ public class MediaController {
         signal(SIGPIPE, SIG_IGN)
     }()
 
+    // PATCH (IslandBar): lets the host health-check the listener and restart it when the
+    // helper died before producing any event (onListenerTerminated only fires after events).
+    public var isListening: Bool {
+        listeningProcess?.isRunning == true
+    }
+
     public var onTrackInfoReceived: ((TrackInfo?) -> Void)?
     public var onListenerTerminated: (() -> Void)?
     public var onDecodingError: ((Error, Data) -> Void)?

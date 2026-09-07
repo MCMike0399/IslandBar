@@ -36,6 +36,18 @@ plutil -lint "$ROOT/Resources/Info.plist"
 otool -L "$CONTENTS/MacOS/IslandBar"
 
 if [[ "${1:-}" == "--run" ]]; then
-  pkill -x IslandBar || true
-  open "$APP"
+  # SIGTERM is handled as a clean quit, which also disarms the relaunch watchdog.
+  # Wait for the old instance to leave before opening the new one.
+  if pkill -x IslandBar; then
+    for _ in $(seq 1 25); do
+      pgrep -x IslandBar >/dev/null || break
+      sleep 0.2
+    done
+    pkill -9 -x IslandBar || true
+  fi
+  if [[ "${ISLANDBAR_DEBUG:-}" == "1" ]]; then
+    open --env ISLANDBAR_DEBUG=1 "$APP"
+  else
+    open "$APP"
+  fi
 fi

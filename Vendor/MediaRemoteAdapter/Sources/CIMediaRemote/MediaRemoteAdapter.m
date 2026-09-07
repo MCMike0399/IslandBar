@@ -177,8 +177,10 @@ static void processNowPlayingInfo(NSDictionary *nowPlayingInfo, BOOL isPlaying, 
         printOut(@"NIL");
         return;
     }
-    id title = nowPlayingInfo[(__bridge NSString *)kMRMediaRemoteNowPlayingInfoTitle];
-    if (title == nil || title == [NSNull null] || ([title isKindOfClass:[NSString class]] && [(NSString *)title length] == 0)) return;
+    // PATCH (IslandBar): upstream silently dropped payloads whose title was nil/empty.
+    // Chromium browsers (Arc's mini player, for one) re-publish Now Playing info with an
+    // empty title right after clearing it, so dropping here left the host believing the
+    // session had ended. Emit everything non-empty and let the host decide what to show.
 
     NSMutableDictionary *data = convertNowPlayingInformation(nowPlayingInfo);
     [data setObject:@(isPlaying) forKey:(NSString *)kIsPlaying];

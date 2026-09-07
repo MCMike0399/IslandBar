@@ -42,7 +42,6 @@ final class NowPlayingStore {
     var palette = ArtworkPalette.fallback
     var audioPermissionDenied = false
     var usingProcedural = false
-    var reopenVisibleUntil: Date?
 
     @ObservationIgnored
     var transport: MediaTransport?
@@ -76,13 +75,33 @@ final class NowPlayingStore {
 final class NowPlayingMonitor: MediaTransport {
     private let controller = MediaController()
     private let store: NowPlayingStore
+    private let registry: AudioProcessRegistry
     private var nilWork: DispatchWorkItem?
     private var playingWork: DispatchWorkItem?
     private var restartAttempt = 0
     private var lastPaletteKey: String?
 
-    init(store: NowPlayingStore) {
+    /// Playback state as MediaRemote last reported it, before any Core Audio override.
+    private var reportedPlaying = false
+    /// True while `isPlaying` is held up by the app's audio output rather than MediaRemote.
+    private var outputOverride = false
+    private var outputQuietSince: Date?
+    private var outputPoll: DispatchSourceTimer?
+
+    private var healthTimer: DispatchSourceTimer?
+    private var lastEventAt = Date()
+    private var lastProbeAt = Date.distantPast
+    private var probeInFlight = false
+
+    /// Chromium keeps its output stream open briefly after a pause; wait this long
+    /// before dropping an overridden "playing" state.
+    private static let outputQuietGrace: TimeInterval = 3
+    private static let healthInterval: TimeInterval = 10
+    private static let probeInterval: TimeInterval = 30
+
+    init(store: NowPlayingStore, registry: AudioProcessRegistry) {
         self.store = store
+        self.registry = registry
         store.transport = self
         controller.onTrackInfoReceived = { [weak self] info in
             Task { @MainActor in
@@ -94,16 +113,23 @@ final class NowPlayingMonitor: MediaTransport {
                 self?.scheduleRestart()
             }
         }
+        controller.onDecodingError = { error, data in
+            DebugLog.line("track info decode failed: \(error) bytes=\(data.count)")
+        }
     }
 
     func start() {
         controller.startListening()
         DebugLog.line("NowPlayingMonitor listening")
+        startHealthCheck()
     }
 
     func stop() {
         nilWork?.cancel()
         playingWork?.cancel()
+        healthTimer?.cancel()
+        healthTimer = nil
+        stopOutputPoll()
         controller.stopListening()
     }
 
@@ -114,6 +140,9 @@ final class NowPlayingMonitor: MediaTransport {
     func previousTrack() { controller.previousTrack() }
 
     private func handle(_ info: TrackInfo?) {
+        lastEventAt = Date()
+        restartAttempt = 0
+
         guard let info else {
             playingWork?.cancel()
             nilWork?.cancel()
@@ -126,6 +155,9 @@ final class NowPlayingMonitor: MediaTransport {
                 self.store.isPlaying = false
                 self.store.palette = .fallback
                 self.lastPaletteKey = nil
+                self.reportedPlaying = false
+                self.outputOverride = false
+                self.stopOutputPoll()
             }
             nilWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: work)
@@ -138,7 +170,7 @@ final class NowPlayingMonitor: MediaTransport {
 
         let payload = info.payload
         let key = "\(payload.title ?? "")\u{1e}\(payload.artist ?? "")\u{1e}\(payload.album ?? "")"
-        let playing: Bool = {
+        let reported: Bool = {
             if let flag = payload.isPlaying { return flag }
             return (payload.playbackRate ?? 0) > 0
         }()
@@ -158,7 +190,7 @@ final class NowPlayingMonitor: MediaTransport {
         store.session = next
         if sessionChanged {
             DebugLog.line(
-                "session bundle=\(next.bundleID) pid=\(next.pid) title=\(next.title) artist=\(next.artist) isPlaying=\(playing)"
+                "session bundle=\(next.bundleID) pid=\(next.pid) title=\(next.title) artist=\(next.artist) isPlaying=\(reported)"
             )
         }
         if lastPaletteKey != key {
@@ -166,6 +198,34 @@ final class NowPlayingMonitor: MediaTransport {
             store.palette = ArtworkPalette.make(from: next.artwork)
         }
 
+        reportedPlaying = reported
+        let playing = effectivePlaying(for: next.tapSession, reported: reported)
+        applyPlaying(playing)
+    }
+
+    /// MediaRemote's flag, unless it says paused while the app is still producing audio
+    /// (Arc's mini player reports a paused tab while another one plays).
+    private func effectivePlaying(for session: NowPlayingSession, reported: Bool) -> Bool {
+        if reported {
+            outputOverride = false
+            stopOutputPoll()
+            return true
+        }
+        if registry.isOutputActive(for: session) {
+            if !outputOverride {
+                DebugLog.line("isPlaying override: MediaRemote paused but \(session.bundleID) is running output")
+            }
+            outputOverride = true
+            outputQuietSince = nil
+            startOutputPoll()
+            return true
+        }
+        outputOverride = false
+        stopOutputPoll()
+        return false
+    }
+
+    private func applyPlaying(_ playing: Bool) {
         if playing != store.isPlaying {
             playingWork?.cancel()
             let work = DispatchWorkItem { [weak self] in
@@ -178,6 +238,82 @@ final class NowPlayingMonitor: MediaTransport {
         } else {
             playingWork?.cancel()
             playingWork = nil
+        }
+    }
+
+    // MARK: Core Audio output poll (only while overriding MediaRemote)
+
+    private func startOutputPoll() {
+        guard outputPoll == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.setEventHandler { [weak self] in
+            self?.pollOutput()
+        }
+        timer.resume()
+        outputPoll = timer
+    }
+
+    private func stopOutputPoll() {
+        outputPoll?.cancel()
+        outputPoll = nil
+        outputQuietSince = nil
+    }
+
+    private func pollOutput() {
+        guard outputOverride, !reportedPlaying, let session = store.session?.tapSession else {
+            stopOutputPoll()
+            return
+        }
+        if registry.isOutputActive(for: session) {
+            outputQuietSince = nil
+            return
+        }
+        let since = outputQuietSince ?? Date()
+        outputQuietSince = since
+        if Date().timeIntervalSince(since) >= Self.outputQuietGrace {
+            DebugLog.line("isPlaying override ended: \(session.bundleID) stopped output")
+            outputOverride = false
+            stopOutputPoll()
+            applyPlaying(false)
+        }
+    }
+
+    // MARK: Listener health
+
+    private func startHealthCheck() {
+        healthTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + Self.healthInterval, repeating: Self.healthInterval)
+        timer.setEventHandler { [weak self] in
+            self?.checkHealth()
+        }
+        timer.resume()
+        healthTimer = timer
+    }
+
+    private func checkHealth() {
+        if !controller.isListening {
+            DebugLog.line("listener not running; restarting")
+            controller.startListening()
+            return
+        }
+        // While idle, re-read MediaRemote directly now and then in case a notification
+        // was missed; a positive answer resyncs the store, a negative one is ignored.
+        guard store.session == nil, !probeInFlight,
+              Date().timeIntervalSince(lastEventAt) >= Self.probeInterval,
+              Date().timeIntervalSince(lastProbeAt) >= Self.probeInterval
+        else { return }
+        lastProbeAt = Date()
+        probeInFlight = true
+        controller.getTrackInfo { [weak self] info in
+            Task { @MainActor in
+                guard let self else { return }
+                self.probeInFlight = false
+                guard let info else { return }
+                DebugLog.line("probe found a session the listener missed; resyncing")
+                self.handle(info)
+            }
         }
     }
 

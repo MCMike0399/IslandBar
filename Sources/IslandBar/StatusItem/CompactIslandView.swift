@@ -1,6 +1,14 @@
 import AppKit
 import SwiftUI
 
+enum CompactIslandMetrics {
+    static let barWidth: CGFloat = 2.5
+    static let gap: CGFloat = 2
+    /// Bars only, no artwork: N bars + (N-1) gaps, plus 8 pt insets each side.
+    static let pillWidth: CGFloat = CGFloat(BarLevels.count) * barWidth + CGFloat(BarLevels.count - 1) * gap + 16
+    static let pillHeight: CGFloat = 18
+}
+
 struct CompactIslandView: View {
     @Environment(NowPlayingStore.self) private var store
     @Environment(Preferences.self) private var preferences
@@ -16,41 +24,19 @@ struct CompactIslandView: View {
                     Capsule()
                         .fill(Color.black.opacity(0.92))
                 }
-                HStack(spacing: 4) {
-                    artwork
-                    Spacer(minLength: 0)
-                    IslandBarsView(
-                        levels: levels,
-                        palette: store.palette,
-                        barWidth: 2.5,
-                        gap: 2,
-                        minHeight: 2.5,
-                        maxHeight: 14
-                    )
-                }
-                .padding(.leading, 2)
-                .padding(.trailing, 8)
+                IslandBarsView(
+                    levels: levels,
+                    flat: !store.isPlaying,
+                    palette: store.palette,
+                    barWidth: CompactIslandMetrics.barWidth,
+                    gap: CompactIslandMetrics.gap,
+                    minHeight: 2.5,
+                    maxHeight: 14
+                )
             }
-            .frame(width: 62, height: 18)
-            .frame(width: 62, height: buttonHeight, alignment: .center)
+            .frame(width: CompactIslandMetrics.pillWidth, height: CompactIslandMetrics.pillHeight)
+            .frame(width: CompactIslandMetrics.pillWidth, height: buttonHeight, alignment: .center)
         }
         .environment(\.colorScheme, .dark)
-    }
-
-    @ViewBuilder
-    private var artwork: some View {
-        let shape = RoundedRectangle(cornerRadius: 4, style: .continuous)
-        Group {
-            if let image = store.session?.artwork {
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFill()
-            } else {
-                Color(white: 0.22)
-            }
-        }
-        .frame(width: 14, height: 14)
-        .clipShape(shape)
     }
 }

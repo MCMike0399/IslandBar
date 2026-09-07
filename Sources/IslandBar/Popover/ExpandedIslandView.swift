@@ -1,57 +1,81 @@
 import SwiftUI
 
+/// Single source of truth for the popover size so the SwiftUI frame and
+/// `NSPopover.contentSize` can never disagree (a mismatch clips the card).
+enum ExpandedIslandMetrics {
+    static let width: CGFloat = 300
+    static let height: CGFloat = 150
+    static let padding: CGFloat = 14
+    static let artwork: CGFloat = 72
+    static var size: NSSize { NSSize(width: width, height: height) }
+}
+
 struct ExpandedIslandView: View {
     @Environment(NowPlayingStore.self) private var store
 
     var body: some View {
         ZStack {
             HUDBackground()
-            HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .center, spacing: 14) {
                 artwork
-                VStack(alignment: .leading, spacing: 6) {
-                    MarqueeText(text: store.session?.title.isEmpty == false ? store.session!.title : "Not Playing", font: .headline.bold())
-                        .frame(height: 16)
-                    Text(store.session?.artist ?? "")
+                VStack(alignment: .leading, spacing: 5) {
+                    MarqueeText(text: displayTitle, font: .headline.bold())
+                        .frame(height: 18)
+                    Text(store.session?.artist ?? " ")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(height: 16, alignment: .leading)
                     Text(store.session?.appName ?? "")
                         .font(.caption2)
-                        .padding(.horizontal, 6)
+                        .padding(.horizontal, 7)
                         .padding(.vertical, 2)
                         .background(.white.opacity(0.12), in: Capsule())
+                        .frame(height: 18, alignment: .leading)
                     IslandBarsView(
                         levels: store.isPlaying ? store.barLevels : .rest,
+                        flat: !store.isPlaying,
                         palette: store.palette,
                         barWidth: 5,
                         gap: 3,
                         minHeight: 4,
-                        maxHeight: 36
+                        maxHeight: 24
                     )
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    HStack(spacing: 18) {
-                        Button(action: { store.previousTrack() }) {
-                            Image(systemName: "backward.end.fill")
-                        }
-                        .buttonStyle(.plain)
-                        Button(action: { store.togglePlayPause() }) {
-                            Image(systemName: store.isPlaying ? "pause.fill" : "play.fill")
-                        }
-                        .buttonStyle(.plain)
-                        Button(action: { store.nextTrack() }) {
-                            Image(systemName: "forward.end.fill")
-                        }
-                        .buttonStyle(.plain)
+                    HStack(spacing: 22) {
+                        transportButton("backward.end.fill") { store.previousTrack() }
+                        transportButton(store.isPlaying ? "pause.fill" : "play.fill") { store.togglePlayPause() }
+                        transportButton("forward.end.fill") { store.nextTrack() }
                     }
                     .font(.title3)
+                    .frame(height: 22)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .clipped()
             }
-            .padding(12)
+            .padding(ExpandedIslandMetrics.padding)
             .foregroundStyle(.white)
         }
-        .frame(width: 280, height: 120)
+        .frame(width: ExpandedIslandMetrics.width, height: ExpandedIslandMetrics.height)
+        .clipped()
         .environment(\.colorScheme, .dark)
+    }
+
+    private var displayTitle: String {
+        guard let session = store.session else { return "Not Playing" }
+        if !session.title.isEmpty { return session.title }
+        if !session.artist.isEmpty { return session.artist }
+        return session.appName
+    }
+
+    private func transportButton(_ symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .frame(width: 24, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var artwork: some View {
@@ -60,13 +84,16 @@ struct ExpandedIslandView: View {
             if let image = store.session?.artwork {
                 Image(nsImage: image)
                     .resizable()
+                    .interpolation(.high)
                     .scaledToFill()
             } else {
                 Color(white: 0.2)
             }
         }
-        .frame(width: 72, height: 72)
+        .frame(width: ExpandedIslandMetrics.artwork, height: ExpandedIslandMetrics.artwork)
         .clipShape(shape)
+        .overlay(shape.strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.45), radius: 8, y: 3)
     }
 }
 
@@ -79,6 +106,7 @@ struct HUDBackground: NSViewRepresentable {
         view.appearance = NSAppearance(named: .vibrantDark)
         view.wantsLayer = true
         view.layer?.cornerRadius = 14
+        view.layer?.masksToBounds = true
         return view
     }
 
@@ -118,23 +146,42 @@ struct MarqueeText: View {
                         }
                     )
                     .offset(x: x)
+                    .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
             }
             .clipped()
+            .mask(edgeFade(overflow: overflow))
             .onPreferenceChange(WidthKey.self) { textWidth = $0 }
         }
+    }
+
+    /// Soft fade on the trailing edge while the text is scrolling.
+    private func edgeFade(overflow: Bool) -> some View {
+        LinearGradient(
+            stops: [
+                .init(color: .black, location: 0),
+                .init(color: .black, location: overflow ? 0.9 : 1),
+                .init(color: overflow ? .clear : .black, location: 1),
+            ],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
     }
 
     private func marqueeOffset(time: TimeInterval, textWidth: CGFloat, viewWidth: CGFloat) -> CGFloat {
         let extra = textWidth - viewWidth
         guard extra > 0 else { return 0 }
-        let pause = 1.1
-        let speed = 26.0
-        let travel = Double(extra + 12)
+        let pause = 1.4
+        let speed = 28.0
+        let travel = Double(extra + 16)
         let scroll = travel / speed
-        let period = pause + scroll + 0.4
+        let hold = 1.0
+        let period = pause + scroll + hold
         let t = time.truncatingRemainder(dividingBy: period)
         if t < pause { return 0 }
-        let p = min(1, (t - pause) / scroll)
-        return -CGFloat(p) * CGFloat(travel)
+        if t > pause + scroll { return -CGFloat(travel) }
+        let p = (t - pause) / scroll
+        // Ease in/out so the start and stop are not abrupt.
+        let eased = 0.5 - 0.5 * cos(p * .pi)
+        return -CGFloat(eased) * CGFloat(travel)
     }
 }

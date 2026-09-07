@@ -98,6 +98,27 @@ final class AudioProcessRegistry: @unchecked Sendable {
         }
     }
 
+    /// True when `process` belongs to the app that owns `session`: same pid, same bundle ID,
+    /// or same three-component bundle prefix compared case-insensitively. Chromium browsers
+    /// play audio from a helper whose bundle differs only in case and suffix
+    /// (`company.thebrowser.Browser` vs `company.thebrowser.browser.helper`).
+    static func matches(session: NowPlayingSession, process: AudioProcessInfo) -> Bool {
+        func prefix3(_ bid: String) -> String {
+            bid.lowercased().split(separator: ".").prefix(3).joined(separator: ".")
+        }
+        if process.pid == session.pid { return true }
+        if !session.bundleID.isEmpty, process.bundleID.caseInsensitiveCompare(session.bundleID) == .orderedSame {
+            return true
+        }
+        let sessionPrefix = prefix3(session.bundleID)
+        return !sessionPrefix.isEmpty && prefix3(process.bundleID) == sessionPrefix
+    }
+
+    /// Whether any process of the session's app is currently producing output.
+    func isOutputActive(for session: NowPlayingSession) -> Bool {
+        snapshot().contains { $0.isRunningOutput && Self.matches(session: session, process: $0) }
+    }
+
     func objectID(forPID pid: pid_t) -> AudioObjectID? {
         var qualifier = pid
         let id: AudioObjectID? = CoreAudioProps.get(

@@ -11,17 +11,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var tapController: TapController!
     private var statusItem: StatusItemController!
     private var settings: SettingsWindowController!
+    private let watchdog = RelaunchWatchdog()
+    private var termSignal: DispatchSourceSignal?
     private var lastAppliedPlay = false
     private var lastAppliedSession: NowPlayingSession?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         preferences = Preferences()
         store = NowPlayingStore()
-        monitor = NowPlayingMonitor(store: store)
+        let registry = AudioProcessRegistry()
+        monitor = NowPlayingMonitor(store: store, registry: registry)
         settings = SettingsWindowController(preferences: preferences)
 
         let shared = SharedBarState()
-        let registry = AudioProcessRegistry()
         tapController = TapController(registry: registry, shared: shared) { [weak self] levels, _, _ in
             Task { @MainActor in
                 guard let self, self.store.isPlaying else { return }
@@ -63,6 +65,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         DebugLog.line("IslandBar launched pid=\(ProcessInfo.processInfo.processIdentifier)")
+        installTerminationSignalHandler()
+        watchdog.arm()
+    }
+
+    /// `pkill`/`kill` send SIGTERM, which would otherwise skip `applicationWillTerminate`
+    /// and leave the relaunch watchdog armed. Route it through a clean quit instead.
+    private func installTerminationSignalHandler() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler {
+            DebugLog.line("SIGTERM received; quitting cleanly")
+            NSApp.terminate(nil)
+        }
+        source.resume()
+        termSignal = source
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -71,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        watchdog.disarm()
         monitor.stop()
         tapController.stop()
     }

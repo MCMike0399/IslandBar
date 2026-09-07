@@ -210,7 +210,7 @@ final class TapController: @unchecked Sendable {
 
     private var session: NowPlayingSession?
     private var isPlaying = false
-    private var prefs = PreferencesSnapshot(showPillBackground: true, hideWhenPaused: false, analysisSource: .automatic)
+    private var prefs = PreferencesSnapshot(showPillBackground: true, analysisSource: .automatic)
     private var phase: TapPhase = .idle
     private var stopWork: DispatchWorkItem?
     private var ioWatchWork: DispatchWorkItem?
@@ -495,21 +495,12 @@ final class TapController: @unchecked Sendable {
         processes: [AudioProcessInfo],
         registry: AudioProcessRegistry
     ) -> [AudioObjectID] {
-        func prefix3(_ bid: String) -> String {
-            bid.split(separator: ".").prefix(3).joined(separator: ".")
-        }
-        let sessionPrefix = prefix3(session.bundleID)
         var ids = Set<AudioObjectID>()
         if let direct = registry.objectID(forPID: session.pid) {
             ids.insert(direct)
         }
-        for proc in processes {
-            if proc.pid == session.pid
-                || proc.bundleID == session.bundleID
-                || (!sessionPrefix.isEmpty && prefix3(proc.bundleID) == sessionPrefix)
-            {
-                ids.insert(proc.objectID)
-            }
+        for proc in processes where AudioProcessRegistry.matches(session: session, process: proc) {
+            ids.insert(proc.objectID)
         }
         return Array(ids)
     }

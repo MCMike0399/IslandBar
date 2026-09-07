@@ -20,7 +20,6 @@ enum AnalysisSource: String, CaseIterable, Identifiable, Sendable {
 
 struct PreferencesSnapshot: Sendable {
     var showPillBackground: Bool
-    var hideWhenPaused: Bool
     var analysisSource: AnalysisSource
 }
 
@@ -29,9 +28,6 @@ struct PreferencesSnapshot: Sendable {
 final class Preferences {
     var showPillBackground: Bool {
         didSet { UserDefaults.standard.set(showPillBackground, forKey: Keys.showPillBackground) }
-    }
-    var hideWhenPaused: Bool {
-        didSet { UserDefaults.standard.set(hideWhenPaused, forKey: Keys.hideWhenPaused) }
     }
     var analysisSource: AnalysisSource {
         didSet { UserDefaults.standard.set(analysisSource.rawValue, forKey: Keys.analysisSource) }
@@ -55,7 +51,6 @@ final class Preferences {
     var snapshot: PreferencesSnapshot {
         PreferencesSnapshot(
             showPillBackground: showPillBackground,
-            hideWhenPaused: hideWhenPaused,
             analysisSource: analysisSource
         )
     }
@@ -66,7 +61,6 @@ final class Preferences {
             d.set(true, forKey: Keys.showPillBackground)
         }
         showPillBackground = d.object(forKey: Keys.showPillBackground) as? Bool ?? true
-        hideWhenPaused = d.bool(forKey: Keys.hideWhenPaused)
         let raw = d.string(forKey: Keys.analysisSource) ?? AnalysisSource.automatic.rawValue
         analysisSource = AnalysisSource(rawValue: raw) ?? .automatic
         launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -74,7 +68,6 @@ final class Preferences {
 
     private enum Keys {
         static let showPillBackground = "showPillBackground"
-        static let hideWhenPaused = "hideWhenPaused"
         static let analysisSource = "analysisSource"
     }
 }
