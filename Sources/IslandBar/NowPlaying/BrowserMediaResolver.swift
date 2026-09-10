@@ -235,13 +235,20 @@ enum MediaSite {
 /// is most likely playing, and fills in title / channel / thumbnail (YouTube via oEmbed).
 @MainActor
 final class BrowserMediaResolver {
-    static let pollInterval: TimeInterval = 4
+    /// Fast probe interval, used only for a short window after a Now Playing event —
+    /// that is when a page publishes what it is playing.
+    static let probeInterval: TimeInterval = 4
+    /// Steady-state poll. Every poll is an `osascript` child plus an Apple Event to the
+    /// browser, and the picked tab rarely changes, so this is deliberately slow.
+    static let pollInterval: TimeInterval = 15
     /// While paused nothing changes quickly; poll less so a paused tab costs almost nothing.
-    static let pausedPollInterval: TimeInterval = 12
+    static let pausedPollInterval: TimeInterval = 30
     /// A denied Automation prompt is retried after this long, in case the user flipped the
     /// switch in System Settings without using the menu item.
     static let deniedRetryInterval: TimeInterval = 60
-    static let enrichmentCacheLimit = 24
+    static let enrichmentCacheLimit: Int = 24
+    /// How long the fast probe stays on after a Now Playing event.
+    private static let probeWindow: TimeInterval = 12
 
     var onChange: (() -> Void)?
     var onAccessDenied: ((String) -> Void)?
@@ -259,6 +266,8 @@ final class BrowserMediaResolver {
     private var enriched: [String: BrowserMedia] = [:]
     private var enrichmentInFlight: Set<String> = []
     private var consecutiveFailures = 0
+    private var playing = false
+    private var probeUntil = Date.distantPast
 
     /// Start (or keep) following `bundleID`. Called on every title-less Now Playing event.
     func track(bundleID: String, playing: Bool) {
@@ -267,6 +276,10 @@ final class BrowserMediaResolver {
             return
         }
         preferActiveTab = true
+        // A now-playing event means the page may have just changed media: probe quickly
+        // for a moment, then fall back to the slow poll.
+        probeUntil = Date().addingTimeInterval(Self.probeWindow)
+        self.playing = playing
         if browser?.bundleID != bundleID {
             browser = candidate
             current = nil
@@ -277,16 +290,29 @@ final class BrowserMediaResolver {
             guard Date().timeIntervalSince(deniedAt) >= Self.deniedRetryInterval else { return }
             deniedBundleIDs[bundleID] = nil
         }
-        let interval = playing ? Self.pollInterval : Self.pausedPollInterval
-        if timer == nil || interval != currentInterval {
-            timer?.cancel()
-            currentInterval = interval
-            let timer = DispatchSource.makeTimerSource(queue: .main)
-            timer.schedule(deadline: .now(), repeating: interval, leeway: .milliseconds(500))
-            timer.setEventHandler { [weak self] in self?.poll() }
-            timer.resume()
-            self.timer = timer
+        rescheduleIfNeeded()
+    }
+
+    /// Re-arms the poll timer when the wanted interval changed (play state, or the fast
+    /// probe window starting or expiring).
+    private func rescheduleIfNeeded() {
+        guard browser != nil else { return }
+        let interval: TimeInterval
+        if !playing {
+            interval = Self.pausedPollInterval
+        } else if Date() < probeUntil {
+            interval = Self.probeInterval
+        } else {
+            interval = Self.pollInterval
         }
+        guard timer == nil || interval != currentInterval else { return }
+        timer?.cancel()
+        currentInterval = interval
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now(), repeating: interval, leeway: .milliseconds(500))
+        timer.setEventHandler { [weak self] in self?.poll() }
+        timer.resume()
+        self.timer = timer
     }
 
     /// The user asked to re-enable tab access: forget denials and poll again right away.
@@ -308,6 +334,9 @@ final class BrowserMediaResolver {
     }
 
     private func poll() {
+        // The fast probe window can expire at any tick, including while a poll is still
+        // in flight; re-arm before doing any work so the cadence always relaxes.
+        rescheduleIfNeeded()
         guard let browser, !pollInFlight else { return }
         pollInFlight = true
         Task { @MainActor in
@@ -323,6 +352,7 @@ final class BrowserMediaResolver {
                     deniedBundleIDs[browser.bundleID] = Date()
                     timer?.cancel()
                     timer = nil
+                    currentInterval = 0
                     onAccessDenied?(browser.bundleID)
                 } else if error.isBrowserGone {
                     stop()

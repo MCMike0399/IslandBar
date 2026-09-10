@@ -67,6 +67,14 @@ final class ProcessAudioTap: @unchecked Sendable {
     private(set) var isRunning = false
     private var asbd = AudioStreamBasicDescription()
 
+    /// Stage-tap UID, held for the life of the process so a rebuilt tap keeps the same
+    /// identity. Core Audio records a recording session per tap, and a fresh UUID made
+    /// every rebuild look like a brand-new recording to macOS (observed as one
+    /// "starting recording" event per rebuild in the `audiomxd` log). The aggregate device
+    /// UID stays per-instance: reusing it after a destroy is what raises
+    /// `kAudioHardwareBadObjectError`.
+    private static let stageUID = UUID().uuidString
+
     var sampleRate: Double { asbd.mSampleRate == 0 ? 48_000 : asbd.mSampleRate }
     var callbackCount: Int { ioCallbacks }
 
@@ -88,7 +96,7 @@ final class ProcessAudioTap: @unchecked Sendable {
         var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         _ = AudioObjectGetPropertyData(tapID, &formatAddr, 0, nil, &formatSize, &asbd)
 
-        let tapUID = description.uuid.uuidString
+        let tapUID = Self.stageUID
         let aggUID = UUID().uuidString
         let composition: [String: Any] = [
             kAudioAggregateDeviceNameKey: "IslandBar",
@@ -191,11 +199,18 @@ struct NowPlayingSession: Sendable, Equatable {
     var paletteKey: String
 }
 
-enum TapPhase: String, Sendable {
+/// What the running tap is attached to. Replacing one of these with another means a
+/// teardown + create, which macOS logs as a new recording session — so the controller
+/// keeps whatever it has for the whole playing session and only narrows once.
+enum TapSource: Equatable, Sendable {
+    /// Nothing is being captured: no session, not playing, procedural, or tap unavailable.
+    case none
+    /// Tapping the processes matched to the Now Playing app.
     case matched
-    case allOutput
-    case procedural
-    case idle
+    /// Tapping every process that outputs audio except IslandBar itself.
+    case globalOutput
+
+    var isTapping: Bool { self != .none }
 }
 
 /// Owns target selection, tap lifetime, procedural fallback, and the bar pump.
@@ -211,14 +226,42 @@ final class TapController: @unchecked Sendable {
     private var session: NowPlayingSession?
     private var isPlaying = false
     private var prefs = PreferencesSnapshot(showPillBackground: true, analysisSource: .automatic)
-    private var phase: TapPhase = .idle
-    private var stopWork: DispatchWorkItem?
+    private var phase: TapSource = .none
     private var ioWatchWork: DispatchWorkItem?
     private var selectWork: DispatchWorkItem?
-    private var silenceSince: CFAbsoluteTime?
-    private var allOutputSince: CFAbsoluteTime?
     private var lastTargetIDs: [AudioObjectID] = []
     private var permissionDenied = false
+
+    // MARK: Tap stability
+    //
+    // A process tap is not free to create: macOS opens a recording session on the default
+    // output device for it, which happens on the default output device's route and is
+    // reported to TCC. The first version of this controller rebuilt the tap whenever its
+    // idea of "what to tap" changed — silence, a track change, any app starting or
+    // stopping audio — and macOS answered with a recording-session event (and a TCC
+    // query) about once every two minutes, plus a system warning that IslandBar was
+    // "asking to record" too often. The rules below exist to make a tap last the whole
+    // playing session instead.
+
+    /// A rebuild before this much time has passed is refused, whatever the reason.
+    private static let minTapResidency: CFAbsoluteTime = 15
+    /// Backoff per rebuild within one playing session, capped.
+    private static let rebuildBackoff: [CFAbsoluteTime] = [20, 45, 90, 180, 300]
+    /// A tap on a dead or silent target is only replaced after it has been silent this long.
+    private static let targetLossGrace: CFAbsoluteTime = 3
+    /// How long after the tap starts a narrowing pass (global → matched) may happen.
+    private static let narrowingWindow: CFAbsoluteTime = 20
+    /// After a genuine permission error, wait this long before trying a tap again.
+    private static let permissionRetry: CFAbsoluteTime = 300
+
+    private var tapStartedAt: CFAbsoluteTime = 0
+    private var rebuildsThisSession = 0
+    private var nextRebuildAt: CFAbsoluteTime = 0
+    private var targetLostSince: CFAbsoluteTime?
+    private var lastSessionPID: pid_t?
+    private var canNarrowUntil: CFAbsoluteTime = 0
+    private var lastPermissionFailureAt: CFAbsoluteTime = 0
+    private var denialReported = false
 
     var onPermissionDenied: (@Sendable () -> Void)?
     var onUsingProcedural: (@Sendable (Bool) -> Void)?
@@ -264,7 +307,7 @@ final class TapController: @unchecked Sendable {
             procedural.stop()
             tap.stop()
             pump.stop()
-            phase = .idle
+            phase = .none
         }
         registry.stop()
     }
@@ -285,140 +328,144 @@ final class TapController: @unchecked Sendable {
         if session == nil {
             cancelTimers()
             tearDownAudio(reason: "session-ended")
-            pump.stop()
+            pump.rest()
             shared.publish(bars: BarLevels.rest.values, rmsDb: -120, fromTap: false)
             return
         }
 
+        // A pause is not a reason to throw the tap away: recreating it is what macOS
+        // reports as a fresh recording session. Stop the work that consumes audio and
+        // leave the tap itself alone until the session really ends.
         if !isPlaying {
-            stopWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                self?.tearDownAudio(reason: "paused")
-            }
-            stopWork = work
-            queue.asyncAfter(deadline: .now() + 0.3, execute: work)
+            targetLostSince = nil
+            analyzer.stop()
+            procedural.stop()
+            pump.rest()
             return
         }
 
-        stopWork?.cancel()
-        stopWork = nil
         if !pump.isRunning { pump.start() }
-        if playChanged || phase == .idle {
-            silenceSince = nil
-            allOutputSince = nil
-            phase = .idle
-            selectAndStart(reason: "playing")
-        } else if sessionChanged {
-            // A track change inside the same app usually keeps the same target
-            // processes; leave a matched tap running and let selectAndStart restart
-            // only if the targets really differ. Anything else gets a fresh match.
-            silenceSince = nil
-            allOutputSince = nil
-            if phase != .matched { phase = .idle }
-            selectAndStart(reason: "session-change")
+        if playChanged || sessionChanged || !phase.isTapping {
+            targetLostSince = nil
+            renewTap(reason: playChanged ? "playing" : "session-change")
         }
     }
 
     private func handleProcessListChange() {
         guard isPlaying, session != nil else { return }
-        if phase != .matched {
-            // Chromium spawns and retires audio helpers in bursts; coalesce them so
-            // the aggregate device is not rebuilt for every intermediate list.
-            scheduleReselect(after: 0.5)
-        }
+        // Only a tap that is not attached to what the session needs cares about the
+        // process list; a healthy tap ignores it, because every rebuild is a recording
+        // session as far as macOS is concerned. When no tap exists at all (`phase ==
+        // .none`) the paths that decided that already scheduled their own retry, and a
+        // pending retry means there is nothing to add.
+        guard selectWork == nil, phase.isTapping else { return }
+        guard phase != .matched || resolveTargets() != lastTargetIDs else { return }
+        scheduleReselect(after: 0.5)
     }
 
     private func rebuildIfNeeded(reason: String) {
         guard isPlaying, session != nil else { return }
-        selectAndStart(reason: reason)
+        renewTap(reason: reason)
     }
 
-    private func selectAndStart(reason: String) {
+    /// Decides whether the running tap can stay, and starts one only when it cannot.
+    /// This is the single place a process tap is created.
+    private func renewTap(reason: String) {
         selectWork?.cancel()
         guard isPlaying, let session else { return }
 
-        if DebugLog.forceProcedural || prefs.analysisSource == .proceduralOnly || permissionDenied {
-            enterProcedural(reason: "forced-or-denied (\(reason))")
+        if DebugLog.forceProcedural || prefs.analysisSource == .proceduralOnly {
+            enterProcedural(reason: "forced-procedural (\(reason))")
             return
         }
-
-        let processes = registry.snapshot()
-        let selfPID = ProcessInfo.processInfo.processIdentifier
-        let matched = Self.matchTargets(session: session, processes: processes, registry: registry)
+        if permissionDenied {
+            let now = CFAbsoluteTimeGetCurrent()
+            guard now - lastPermissionFailureAt >= Self.permissionRetry else {
+                enterProcedural(reason: "permission-denied (\(reason))")
+                return
+            }
+            permissionDenied = false
+            DebugLog.line("retrying the process tap after a permission failure")
+        }
 
         let now = CFAbsoluteTimeGetCurrent()
-        let rms = shared.snapshot().rmsDb
-        let silent = rms < -60
+        let matched = resolveTargets()
+        let sessionPIDChanged = lastSessionPID != nil && lastSessionPID != session.pid
 
-        var nextPhase = phase
-        var targets: [AudioObjectID] = []
+        var wantMatched = prefs.analysisSource == .automatic && !matched.isEmpty
+        if case .globalOutput = phase, now > canNarrowUntil {
+            // The one narrowing pass: the match was not known when the tap was created.
+            wantMatched = wantMatched && now - tapStartedAt >= 3
+        }
 
-        switch prefs.analysisSource {
-        case .proceduralOnly:
-            enterProcedural(reason: reason)
-            return
-        case .allSystemOutput:
-            targets = Self.outputTargets(processes, excluding: selfPID)
-            nextPhase = .allOutput
-        case .automatic:
-            if phase == .procedural {
-                // Keep polling (1)→(2) every 5s while procedural.
-                if !matched.isEmpty {
-                    targets = matched
-                    nextPhase = .matched
-                    silenceSince = silent ? (silenceSince ?? now) : nil
-                } else {
-                    targets = Self.outputTargets(processes, excluding: selfPID)
-                    nextPhase = .allOutput
-                }
-            } else if matched.isEmpty {
-                targets = Self.outputTargets(processes, excluding: selfPID)
-                nextPhase = .allOutput
-                allOutputSince = allOutputSince ?? now
-            } else if phase == .allOutput {
-                if let since = allOutputSince, now - since >= 3, silent {
-                    enterProcedural(reason: "silent-after-all-output")
-                    scheduleReselect(after: 5)
-                    return
-                }
-                targets = Self.outputTargets(processes, excluding: selfPID)
-                nextPhase = .allOutput
+        if phase.isTapping, tap.isRunning {
+            let stale = !currentTargetsAreAlive()
+            if stale {
+                targetLostSince = targetLostSince ?? now
             } else {
-                if silent {
-                    silenceSince = silenceSince ?? now
-                } else {
-                    silenceSince = nil
-                }
-                // Quiet scenes and gaps between episodes easily last a couple of seconds;
-                // switching to all-output too eagerly rebuilds the aggregate device.
-                if let since = silenceSince, now - since >= 4 {
-                    targets = Self.outputTargets(processes, excluding: selfPID)
-                    nextPhase = .allOutput
-                    allOutputSince = now
-                } else {
-                    targets = matched
-                    nextPhase = .matched
-                }
+                targetLostSince = nil
+            }
+            let current = lastTargetIDs
+            let needRebuild = sessionPIDChanged
+                ? current != matched
+                : (stale && now - (targetLostSince ?? now) >= Self.targetLossGrace)
+            if !needRebuild {
+                // Nothing to do: keep this tap and just poll again later.
+                scheduleReselect(after: Self.pollInterval(for: phase))
+                return
+            }
+            guard now - tapStartedAt >= Self.minTapResidency, now >= nextRebuildAt else {
+                scheduleReselect(after: 3)
+                return
             }
         }
 
-        if targets.isEmpty {
+        let targets: [AudioObjectID]
+        let source: TapSource
+        if wantMatched {
+            targets = matched
+            source = .matched
+        } else if prefs.analysisSource == .proceduralOnly {
+            enterProcedural(reason: "procedural-only (\(reason))")
+            return
+        } else {
+            let outputs = Self.outputTargets(registry.snapshot(), excluding: ProcessInfo.processInfo.processIdentifier)
+            guard !outputs.isEmpty else {
+                enterProcedural(reason: "no-targets (\(reason))")
+                scheduleReselect(after: 5)
+                return
+            }
+            targets = outputs
+            source = .globalOutput
+        }
+
+        guard !targets.isEmpty else {
             enterProcedural(reason: "no-targets (\(reason))")
-            scheduleReselect(after: phase == .procedural ? 5 : 1.5)
+            scheduleReselect(after: 5)
             return
         }
-
-        if nextPhase == phase, targets == lastTargetIDs, tap.isRunning {
-            // Each poll walks every audio process object through coreaudiod; a healthy
-            // matched tap only needs to notice silence, which now takes 4 s anyway.
-            scheduleReselect(after: nextPhase == .matched ? 3 : 1.5)
-            return
-        }
-
-        startTap(targets: targets, phase: nextPhase, reason: reason)
+        installTap(targets: targets, source: source, reason: reason)
     }
 
-    private func startTap(targets: [AudioObjectID], phase: TapPhase, reason: String) {
+    private static func pollInterval(for source: TapSource) -> CFAbsoluteTime {
+        source == .matched ? 10 : 5
+    }
+
+    /// Processes the session's app would use right now, sorted so the comparison against
+    /// the running tap's target list is order-independent.
+    private func resolveTargets() -> [AudioObjectID] {
+        guard let session else { return [] }
+        return Self.matchTargets(session: session, processes: registry.snapshot(), registry: registry)
+    }
+
+    /// Whether the processes the running tap is attached to are still producing audio.
+    private func currentTargetsAreAlive() -> Bool {
+        guard !lastTargetIDs.isEmpty else { return false }
+        let live = Set(registry.snapshot().lazy.filter(\.isRunningOutput).map(\.objectID))
+        return lastTargetIDs.contains { live.contains($0) }
+    }
+
+    private func installTap(targets: [AudioObjectID], source: TapSource, reason: String) {
         guard let uid = registry.defaultOutputUID() else {
             enterProcedural(reason: "no-output-uid")
             return
@@ -427,19 +474,42 @@ final class TapController: @unchecked Sendable {
         analyzer.stop()
         let status = tap.start(targets: targets, outputUID: uid)
         if status != noErr {
-            permissionDenied = true
-            onPermissionDenied?()
-            DebugLog.line("audioPermissionDenied=true status=\(status)")
+            // Only a real TCC failure should stop us from capturing: everything else
+            // (a device changeover mid-flight, coreaudiod restarting) is worth retrying,
+            // and latching those permanently left the app in procedural mode for good.
+            let denied = status == kAudioHardwareIllegalOperationError
+            permissionDenied = denied
+            if denied {
+                lastPermissionFailureAt = CFAbsoluteTimeGetCurrent()
+                if !denialReported {
+                    denialReported = true
+                    onPermissionDenied?()
+                }
+            }
+            DebugLog.line("tap start failed status=\(status) permissionDenied=\(denied)")
             enterProcedural(reason: "tap-error \(status)")
+            if !denied { scheduleReselect(after: 5) }
             return
         }
-        self.phase = phase
+
+        let now = CFAbsoluteTimeGetCurrent()
+        phase = source
         lastTargetIDs = targets
+        tapStartedAt = now
+        lastSessionPID = session?.pid
+        targetLostSince = nil
+        canNarrowUntil = now + Self.narrowingWindow
+        nextRebuildAt = now + Self.backoffAfterRebuild(rebuildsThisSession)
+        rebuildsThisSession += 1
+
         analyzer.sampleRate = tap.sampleRate
+        tap.ring.reset()
         analyzer.start()
         onUsingProcedural?(false)
-        onTapEvent?("tap created phase=\(phase.rawValue) targets=\(targets) reason=\(reason) pid=\(session?.pid ?? 0)")
-        DebugLog.line("tap created phase=\(phase.rawValue) targets=\(targets) reason=\(reason)")
+        onTapEvent?("tap source=\(source) targets=\(targets) reason=\(reason) pid=\(session?.pid ?? 0)")
+        DebugLog.line(
+            "tap created source=\(source) targets=\(targets) reason=\(reason) rebuild=\(rebuildsThisSession)"
+        )
 
         ioWatchWork?.cancel()
         let startCount = tap.ioCallbackCount
@@ -452,21 +522,35 @@ final class TapController: @unchecked Sendable {
         }
         ioWatchWork = watch
         queue.asyncAfter(deadline: .now() + 2, execute: watch)
-        scheduleReselect(after: 1.5)
+        scheduleReselect(after: Self.pollInterval(for: source))
+    }
+
+    /// Backoff before the *next* rebuild in this session. The first rebuild is cheap
+    /// because a track change legitimately needs new targets; later ones back off so a
+    /// restive target list cannot spin the aggregate device up and down.
+    private static func backoffAfterRebuild(_ rebuilds: Int) -> CFAbsoluteTime {
+        guard rebuilds > 0 else { return 0 }
+        return rebuildBackoff[min(rebuilds - 1, rebuildBackoff.count - 1)]
     }
 
     private func enterProcedural(reason: String) {
         analyzer.stop()
         tap.stop()
         lastTargetIDs = []
-        phase = .procedural
+        phase = .none
         procedural.start()
         if !pump.isRunning { pump.start() }
         onUsingProcedural?(true)
         DebugLog.line("procedural driver active reason=\(reason)")
         onTapEvent?("procedural reason=\(reason)")
-        if isPlaying, prefs.analysisSource == .automatic, !permissionDenied, !DebugLog.forceProcedural {
-            scheduleReselect(after: 5)
+
+        // Procedural is not necessarily final: a denied grant can be turned back on, and
+        // a failed device handover can settle. Retry slowly rather than waiting for a
+        // relaunch (a latched denial still waits out `permissionRetry` inside `renewTap`).
+        if isPlaying,
+           prefs.analysisSource == .automatic,
+           !DebugLog.forceProcedural {
+            scheduleReselect(after: 60)
         }
     }
 
@@ -477,11 +561,16 @@ final class TapController: @unchecked Sendable {
         procedural.stop()
         if tap.isRunning {
             tap.stop()
-            DebugLog.line("tap torn down reason=\(reason)")
+            DebugLog.line("tap torn down reason=\(reason) rebuilds=\(rebuildsThisSession)")
             onTapEvent?("tap torn down reason=\(reason)")
         }
         lastTargetIDs = []
-        phase = .idle
+        phase = .none
+        rebuildsThisSession = 0
+        nextRebuildAt = 0
+        tapStartedAt = 0
+        lastSessionPID = nil
+        targetLostSince = nil
         onUsingProcedural?(false)
     }
 
@@ -489,25 +578,23 @@ final class TapController: @unchecked Sendable {
         selectWork?.cancel()
         guard isPlaying, session != nil else { return }
         let work = DispatchWorkItem { [weak self] in
-            self?.selectAndStart(reason: "poll")
+            self?.renewTap(reason: "poll")
         }
         selectWork = work
         queue.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
     private func cancelTimers() {
-        stopWork?.cancel()
         ioWatchWork?.cancel()
         selectWork?.cancel()
-        stopWork = nil
         ioWatchWork = nil
         selectWork = nil
     }
 
-    /// Target lists are always sorted: `selectAndStart` compares them against the
-    /// running tap's targets to decide whether to leave it alone. An unordered list
-    /// made that check fail on almost every poll, and every rebuild of the aggregate
-    /// device made coreaudiod reconfigure the output and glitch all audio.
+    /// Target lists are always sorted so that comparing them against the running tap's
+    /// targets is order-independent. An unordered list made that check fail on almost
+    /// every poll, and every rebuild of the aggregate device made coreaudiod reconfigure
+    /// the output and glitch all audio.
     private static func matchTargets(
         session: NowPlayingSession,
         processes: [AudioProcessInfo],

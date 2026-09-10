@@ -115,4 +115,15 @@ final class BarLevelPump: @unchecked Sendable {
         timer = nil
         isRunning = false
     }
+
+    /// Drops the eased display back to the rest line and stops the timer. Called when
+    /// playback stops: a 60 Hz main-queue timer easing a static line was pure overhead,
+    /// and the next `start()` must not ease in from stale heights.
+    func rest() {
+        display = BarLevels.rest.values
+        if isRunning {
+            onLevels(BarLevels.rest, -120, false)
+        }
+        stop()
+    }
 }
