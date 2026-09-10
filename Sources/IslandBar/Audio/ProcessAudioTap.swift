@@ -67,16 +67,17 @@ final class ProcessAudioTap: @unchecked Sendable {
     private(set) var isRunning = false
     private var asbd = AudioStreamBasicDescription()
 
-    /// Stage-tap UID, held for the life of the process so a rebuilt tap keeps the same
-    /// identity. Core Audio records a recording session per tap, and a fresh UUID made
-    /// every rebuild look like a brand-new recording to macOS (observed as one
-    /// "starting recording" event per rebuild in the `audiomxd` log). The aggregate device
-    /// UID stays per-instance: reusing it after a destroy is what raises
-    /// `kAudioHardwareBadObjectError`.
-    private static let stageUID = UUID().uuidString
-
     var sampleRate: Double { asbd.mSampleRate == 0 ? 48_000 : asbd.mSampleRate }
     var callbackCount: Int { ioCallbacks }
+
+    /// Whether the aggregate device's IO engine reports itself running. A tap can be
+    /// created successfully and still never deliver a buffer; this separates "the engine
+    /// is stopped" from "the engine runs but the tap produces nothing".
+    var isEngineRunning: Bool {
+        guard aggregateID != CoreAudioProps.unknown else { return false }
+        let running: UInt32? = CoreAudioProps.get(object: aggregateID, selector: kAudioDevicePropertyDeviceIsRunning)
+        return running == 1
+    }
 
     func start(targets: [AudioObjectID], outputUID: String) -> OSStatus {
         stop()
@@ -96,7 +97,11 @@ final class ProcessAudioTap: @unchecked Sendable {
         var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         _ = AudioObjectGetPropertyData(tapID, &formatAddr, 0, nil, &formatSize, &asbd)
 
-        let tapUID = Self.stageUID
+        // A fresh UID per tap. Reusing one UID across creations (an earlier version of
+        // `renewTap` tried this) hands back a tap that coreaudiod still holds from the
+        // previous incarnation: the IO proc runs and the format looks right, but no audio
+        // is ever delivered into it.
+        let tapUID = description.uuid.uuidString
         let aggUID = UUID().uuidString
         let composition: [String: Any] = [
             kAudioAggregateDeviceNameKey: "IslandBar",
@@ -138,9 +143,10 @@ final class ProcessAudioTap: @unchecked Sendable {
         let ioStatus = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, nil) { _, inInputData, _, _, _ in
             let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
             for buf in abl {
-                guard let data = buf.mData else { continue }
+                guard let data = buf.mData, buf.mDataByteSize > 0 else { continue }
                 let channels = max(Int(buf.mNumberChannels), 1)
                 let frames = Int(buf.mDataByteSize) / (MemoryLayout<Float>.size * channels)
+                guard frames > 0 else { continue }
                 ring.writeMixedMono(
                     samples: data.assumingMemoryBound(to: Float.self),
                     frames: frames,
@@ -513,11 +519,18 @@ final class TapController: @unchecked Sendable {
 
         ioWatchWork?.cancel()
         let startCount = tap.ioCallbackCount
+        let startSampleRate = tap.sampleRate
         let watch = DispatchWorkItem { [weak self] in
             guard let self, self.tap.isRunning else { return }
-            if self.tap.ioCallbackCount == startCount {
+            let callbacks = self.tap.ioCallbackCount - startCount
+            if callbacks == 0 {
                 DebugLog.line("IO callback missing within 2s; falling back to procedural")
                 self.enterProcedural(reason: "io-timeout")
+            } else {
+                DebugLog.line(
+                    "tap IO alive: \(callbacks) callbacks in 2s sampleRate=\(startSampleRate) "
+                        + "engineRunning=\(self.tap.isEngineRunning) samplesRead=\(self.analyzer.samplesRead)"
+                )
             }
         }
         ioWatchWork = watch
@@ -557,13 +570,14 @@ final class TapController: @unchecked Sendable {
     private func tearDownAudio(reason: String) {
         ioWatchWork?.cancel()
         selectWork?.cancel()
+        let hadTap = phase.isTapping || tap.isRunning
         analyzer.stop()
         procedural.stop()
-        if tap.isRunning {
-            tap.stop()
+        if hadTap {
             DebugLog.line("tap torn down reason=\(reason) rebuilds=\(rebuildsThisSession)")
             onTapEvent?("tap torn down reason=\(reason)")
         }
+        tap.stop()
         lastTargetIDs = []
         phase = .none
         rebuildsThisSession = 0

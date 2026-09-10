@@ -78,6 +78,14 @@ To exercise the updater without publishing: `ISLANDBAR_UPDATE_FEED_URL` points t
 - The MediaRemote helper is health-checked every 10 seconds and restarted if it died. While idle, MediaRemote is re-read every 30 seconds in case a notification was missed.
 - A detached shell watchdog relaunches the app if it exits without a clean quit (crash or `kill`). SIGTERM is treated as a clean quit, so `pkill -x IslandBar` disarms it. After 5 relaunches in 10 minutes the watchdog stops re-arming; timestamps live in `~/Library/Application Support/IslandBar/relaunches.log`. Set `ISLANDBAR_NO_WATCHDOG=1` to skip it.
 
+## Development notes
+
+[PITFALLS.md](PITFALLS.md) collects the traps that are expensive to rediscover: the tap UID
+that must be fresh on every creation (a reused one is accepted by Core Audio and then
+delivers empty buffers), TCC grants bound to the ad-hoc signature and how to re-point them
+with `Scripts/grant-audio-permission.sh`, launching the binary in a way that changes TCC
+attribution, and the log order to read when the bars stop moving.
+
 ## License
 
 IslandBar sources are original. `Vendor/MediaRemoteAdapter` is BSD-3 (see `Vendor/MediaRemoteAdapter/LICENSE`).

@@ -64,9 +64,15 @@ final class SpectrumAnalyzer: @unchecked Sendable {
         }
     }
 
+    /// Total samples pulled out of the ring since the last `start()`. Zero while the tap
+    /// reports healthy IO callbacks means the tap is connected but delivering silence (a
+    /// permission or route problem), which is otherwise invisible from the outside.
+    private(set) var samplesRead = 0
+
     func start() {
         stop()
         filled = 0
+        samplesRead = 0
         envelope = BarLevels.rest.values
         // Statistics deliberately survive stop/start: a resumed track has the same
         // loudness it had before the pause, so there is nothing to relearn.
@@ -94,6 +100,7 @@ final class SpectrumAnalyzer: @unchecked Sendable {
                 ring.read(buf.baseAddress! + filled, maxCount: want)
             }
             filled += got
+            samplesRead += got
             guard filled >= n else { return }
             analyzeFrame()
             let keep = n - hop
