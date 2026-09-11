@@ -46,14 +46,18 @@ final class BarsLayerView: NSView {
     private var heights: [CGFloat]
     private var flat = true
     private var scale: CGFloat = 2
+    /// True when the bars sit on a light menu bar: the idle line darkens with them.
+    private(set) var lightBackground = false
     /// False while idle or with Reduce Motion on: incoming levels are ignored and
     /// the bars sit at their rest heights.
     var animating = false {
         didSet { if !animating { apply(.rest) } }
     }
 
-    /// Neutral idle line, independent of the last artwork.
+    /// Neutral idle line, independent of the last artwork. The light variant is what the
+    /// same line becomes on a light menu bar, where the default would be near-invisible.
     static let idleColor = NSColor(white: 0.58, alpha: 0.85)
+    static let lightIdleColor = NSColor(white: 0.32, alpha: 0.85)
 
     init(metrics: BarMetrics, glow: Bool) {
         self.metrics = metrics
@@ -143,6 +147,18 @@ final class BarsLayerView: NSView {
         CATransaction.commit()
     }
 
+    /// Appearance changed under us (light menu bar ⇄ dark one): only the idle line's
+    /// colour lives here, the bar colours arrive through `setPalette`.
+    func setLightBackground(_ light: Bool) {
+        guard light != lightBackground else { return }
+        lightBackground = light
+        DebugLog.line("bars: menu bar background=\(light ? "light" : "dark")")
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.35)
+        flatLayer.backgroundColor = (light ? Self.lightIdleColor : Self.idleColor).cgColor
+        CATransaction.commit()
+    }
+
     func setLevels(_ levels: BarLevels) {
         guard animating else { return }
         apply(levels)
@@ -200,6 +216,9 @@ struct IslandBarsView: NSViewRepresentable {
     var metrics: BarMetrics
     /// Soft glow behind the bars. Off in the menu bar, where it is invisible at 18 pt.
     var glow = false
+    /// True on a light menu bar, where the bars darken through `palette.onLightBackground`
+    /// and the idle line does the same. Always false in the popover's dark HUD.
+    var lightBackground = false
 
     final class Coordinator {
         var token: UUID?
@@ -219,7 +238,8 @@ struct IslandBarsView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: BarsLayerView, context: Context) {
-        view.setPalette(palette)
+        view.setPalette(lightBackground ? palette.onLightBackground : palette)
+        view.setLightBackground(lightBackground)
         view.setFlat(flat)
         if view.animating != animating {
             view.animating = animating

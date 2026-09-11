@@ -26,6 +26,14 @@ struct ArtworkPalette: Equatable {
     private static let chromaScale = 0.9
     private static let minChroma = 0.05
     private static let maxChroma = 0.12
+    /// The band the same palette is mapped into when the bars sit on a light menu bar
+    /// instead of the black pill. Pastels and the near-white end of the ramp vanish on
+    /// white, so lightness drops below the midpoint and the chroma cap is raised a
+    /// little: the bars keep the cover's hue but gain enough weight to be read.
+    private static let lightMinL = 0.34
+    private static let lightMaxL = 0.60
+    private static let lightChromaScale = 1.35
+    private static let lightMaxChroma = 0.16
     /// How far the secondary picks are pulled towards the dominant colour before
     /// they become gradient anchors. 0 keeps every cluster as-is (rainbow sweep);
     /// 1 collapses the bars to one flat colour.
@@ -162,6 +170,39 @@ struct ArtworkPalette: Equatable {
     }
 
     // MARK: Display mapping
+
+    /// The same colours re-mapped to sit on a light menu bar, where the pill's black
+    /// capsule is dropped. Only the compact pill uses this; the expanded card keeps the
+    /// pastel palette on its dark HUD, so the mapping happens here rather than in the
+    /// store, which would darken both.
+    var onLightBackground: ArtworkPalette {
+        ArtworkPalette(colors: colors.map(Self.darkened))
+    }
+
+    /// Hue is kept; lightness is moved from the pastel band into the dark one, keeping
+    /// each bar's place in the gradient so the sweep keeps its direction. Grey art stays
+    /// grey — an invented tint looks wrong there in either appearance.
+    private static func darkened(_ color: Color) -> Color {
+        let source = NSColor(color).usingColorSpace(.sRGB) ?? .black
+        var c = Oklab.fromSRGB(
+            r: Double(source.redComponent),
+            g: Double(source.greenComponent),
+            b: Double(source.blueComponent)
+        )
+        let chroma = c.chroma
+        if chroma < 0.012 {
+            c.a = 0
+            c.b = 0
+        } else {
+            let target = min(lightMaxChroma, chroma * lightChromaScale)
+            c.a *= target / chroma
+            c.b *= target / chroma
+        }
+        let t = min(1, max(0, (c.L - minL) / (maxL - minL)))
+        c.L = lightMinL + t * (lightMaxL - lightMinL)
+        let rgb = c.toSRGBClipped()
+        return Color(nsColor: NSColor(deviceRed: rgb.r, green: rgb.g, blue: rgb.b, alpha: 1))
+    }
 
     private static func display(_ lab: Oklab) -> NSColor {
         var c = lab

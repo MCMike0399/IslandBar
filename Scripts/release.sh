@@ -12,6 +12,12 @@
 # override with ISLANDBAR_SIGNING_KEY). Its public half is compiled into
 # Sources/IslandBar/Updates/UpdateSignature.swift; the script refuses to sign with a key
 # that does not match, because such a release would be rejected by every installed copy.
+#
+# A *newly introduced* key is a special case: it is only known to copies that do not
+# exist yet, so the release that ships it must be signed with the previous key, and the
+# release after that can use the new one. The guard below enforces exactly that; see
+# PITFALLS.md ("A release key must ship before it signs anything") for what it cost to
+# learn.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -36,11 +42,46 @@ KEY="${ISLANDBAR_SIGNING_KEY:-$HOME/.config/islandbar/update-signing.key}"
 [[ -r "$KEY" ]] || { echo "error: release key not found at $KEY (swift Tools/update-signing.swift keygen \"$KEY\")" >&2; exit 1; }
 PUBKEY="$(swift Tools/update-signing.swift pubkey "$KEY")"
 EMBEDDED="$(sed -n 's/.*publicKeyBase64 = "\(.*\)".*/\1/p' Sources/IslandBar/Updates/UpdateSignature.swift)"
-if [[ "$PUBKEY" != "$EMBEDDED" ]]; then
+
+PREVIOUS_TAG="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+PREVIOUS_KEY=""
+if [[ -n "$PREVIOUS_TAG" ]]; then
+  PREVIOUS_KEY="$(git show "$PREVIOUS_TAG:Sources/IslandBar/Updates/UpdateSignature.swift" 2>/dev/null \
+    | sed -n 's/.*publicKeyBase64 = "\(.*\)".*/\1/p')"
+  [[ -n "$PREVIOUS_KEY" ]] || echo "warning: could not read the key $PREVIOUS_TAG shipped; cannot check for a rotation" >&2
+fi
+
+# Which key has to sign this release. Normally the one compiled in; on a rotation the one
+# the previous release already shipped, because no installed copy knows the new key yet.
+SIGN_KEY="$EMBEDDED"
+ROTATING=0
+if [[ -n "$PREVIOUS_KEY" && "$PREVIOUS_KEY" != "$EMBEDDED" ]]; then
+  SIGN_KEY="$PREVIOUS_KEY"
+  ROTATING=1
+fi
+
+if [[ "$PUBKEY" != "$SIGN_KEY" ]]; then
+  if [[ $ROTATING -eq 1 ]]; then
+    echo "error: UpdateSignature.swift embeds a key that ships for the first time in this release." >&2
+    echo "  new key:            $EMBEDDED" >&2
+    echo "  previous key:       $PREVIOUS_KEY (trusted by every installed copy)" >&2
+    echo "  ISLANDBAR_SIGNING_KEY points at: $PUBKEY" >&2
+    echo >&2
+    echo "A release signed with the new key is rejected by every copy that is already installed" >&2
+    echo "(\"The downloaded update failed signature verification and was discarded\"). Sign this" >&2
+    echo "release with the previous key, and the next one with the new key:" >&2
+    echo "  ISLANDBAR_SIGNING_KEY=<previous private key> $0 $VERSION" >&2
+    echo "The previous key's private half must still exist for this to work — see PITFALLS.md." >&2
+    exit 1
+  fi
   echo "error: $KEY does not match the public key compiled into UpdateSignature.swift" >&2
   echo "  key file: $PUBKEY" >&2
   echo "  embedded: $EMBEDDED" >&2
   exit 1
+fi
+
+if [[ $ROTATING -eq 1 ]]; then
+  echo "rotating release key: signing with the previous key; sign the NEXT release with $EMBEDDED" >&2
 fi
 
 if [[ $DRY_RUN -eq 0 ]]; then
@@ -52,7 +93,6 @@ if [[ $DRY_RUN -eq 0 ]]; then
   [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] || { echo "error: main is not in sync with origin/main" >&2; exit 1; }
 fi
 
-PREVIOUS_TAG="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
 BUILD_NUMBER="$(( $(git rev-list --count HEAD) + 1 ))"
 
 # Release notes: explicit file, else one bullet per commit since the previous tag.

@@ -149,3 +149,72 @@ while the counter still shows the rebuild. Sessions that genuinely change app (C
 Music) or end are legitimate rebuilds; a rebuild roughly every couple of minutes during
 continuous playback is not — the controller has `minTapResidency`, per-session backoff and
 target-liveness checks to prevent exactly that (`ProcessAudioTap.swift`, "Tap stability").
+
+## The pill's appearance
+
+### It follows the menu bar, which follows the wallpaper — not the system setting
+
+On macOS 26 the menu-bar material is glass: it takes its lightness from the desktop
+picture. Select Light mode over a dark wallpaper and the menu bar is still dark, its
+status items included. Reading the appearance from `NSApp.effectiveAppearance` therefore
+gets it wrong in exactly the case the pill cares about — it would drop the capsule and
+darken the bars on a menu bar that is still black.
+
+`CompactIslandView` reads `@Environment(\.colorScheme)` instead. The hosting view is a
+subview of the status item's button, so that value *is* the menu bar's own appearance, and
+it updates live when the wallpaper (or the system setting) changes it.
+
+**Check it:** the log records the decision, and every change to it:
+
+```
+bars: menu bar background=light
+```
+
+**Compare the two variants without touching the desktop:**
+
+```bash
+ISLANDBAR_DEBUG=1 ISLANDBAR_PILL_APPEARANCE=light open dist/IslandBar.app   # or =dark
+```
+
+`ISLANDBAR_PILL_APPEARANCE` forces `onLightMenuBar`, which is the only practical way to
+see the light rendering on a machine whose wallpaper is dark.
+
+### The compact pill is the only view that adapts
+
+`ArtworkPalette` maps every colour into a pastel band sized for the black pill. On a light
+menu bar the capsule is dropped and `ArtworkPalette.onLightBackground` re-maps those same
+colours into a darker band (hue kept, chroma nudged up) so they still read against white.
+The mapping is applied in `IslandBarsView.updateNSView`, not in the store: the expanded
+popover sits on a dark HUD and must keep the pastel palette.
+
+## Self-update
+
+### A release key must ship before it signs anything
+
+`UpdateSignature.swift` compiles in the keys a copy will accept, which makes rotating one a
+**two-release** operation. v0.2.0 got that wrong: commit `3f6add0` rotated
+`publicKeyBase64` and the same release was signed with the new key, so no copy in
+existence trusted it. The old key's private half was overwritten in the same sitting,
+which left every copy built before the rotation permanently unable to update itself:
+
+```
+The downloaded update failed signature verification and was discarded.
+```
+
+`legacyPublicKeysBase64` only helps *forwards* — a new build accepts an archive signed by
+an old key, never the reverse. A copy already in the wild can only be recovered by hand.
+
+**Recognize it:** that message on a copy that predates the most recent key change.
+**Check it:** the keys a running copy trusts are plain base64 in its binary, and the
+release's signature only verifies under the newest one:
+
+```bash
+strings dist/IslandBar.app/Contents/MacOS/IslandBar | grep -E '^[A-Za-z0-9+/]{43}=$'
+swift Tools/update-signing.swift verify <key in the tree> dist/IslandBar-<v>.zip dist/IslandBar-<v>.zip.sig
+```
+
+**How the script prevents a repeat** (`Scripts/release.sh`): a release whose tree embeds a
+key the previous release did not embed must be signed with the *previous* key. That release
+then ships the new key, and the one after it can sign with it. If the old key is missing the
+script refuses, which is the correct outcome — the rotation cannot be completed without it.
+**Never delete the previous private key** until a release carrying the new one is published.

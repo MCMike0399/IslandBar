@@ -5,6 +5,15 @@ enum DebugLog {
     static let forceProcedural = ProcessInfo.processInfo.environment["ISLANDBAR_FORCE_PROCEDURAL"] == "1"
     /// Pretend browsers publish no metadata, to exercise the tab-reading fallback on demand.
     static let ignoreBrowserMetadata = ProcessInfo.processInfo.environment["ISLANDBAR_IGNORE_BROWSER_METADATA"] == "1"
+    /// `ISLANDBAR_PILL_APPEARANCE=light|dark`: render the pill as if the menu bar were that
+    /// light, so both variants can be compared on one machine. The menu bar's own material
+    /// follows the wallpaper, so this is the only way to see the light pill without
+    /// changing the desktop.
+    static let forcedPillIsLight: Bool? = switch ProcessInfo.processInfo.environment["ISLANDBAR_PILL_APPEARANCE"]?.lowercased() {
+    case "light": true
+    case "dark": false
+    default: nil
+    }
 
     private static let queue = DispatchQueue(label: "dev.burbuja-lab.islandbar.log")
     nonisolated(unsafe) private static let formatter: ISO8601DateFormatter = {
