@@ -1,6 +1,6 @@
 # IslandBar
 
-Menu-bar Now Playing visualizer for Apple Silicon Macs: a compact Dynamic Island pill (twelve artwork-tinted bars, tall at the edges and lower in the middle) that dances only while media plays.
+Menu-bar Now Playing visualizer for Apple Silicon Macs: a compact Dynamic Island pill (twelve artwork-tinted bars on a shared base and a shared ceiling) that dances only while media plays.
 
 macOS 15.4+, unsandboxed. Built with SwiftPM and Command Line Tools — no Xcode project.
 
@@ -34,6 +34,8 @@ ISLANDBAR_DEBUG=1 dist/IslandBar.app/Contents/MacOS/IslandBar
 Left-click the pill to expand (artwork, title, transport). Right-click for Launch at Login, Settings, Check for Updates, and Quit. The pill is always visible: while nothing is playing the bars collapse to a flat gray line.
 
 Bar colours come from the artwork: pixels are clustered in Oklab (k-means, plus a separate pass over the colourful pixels so a small accent on a dark cover is not averaged away) and the four most distinct dominant colours are ordered by hue and interpolated into a gradient across the bars. The runner-up colours are pulled halfway towards the dominant one, so the gradient reads as a single tint with a soft shift rather than a rainbow. Hue is kept; lightness is lifted and chroma is clamped to a pastel range for legibility on the black pill, and greyscale art gives grey bars. Before artwork arrives the bars show a lavender-to-mist default.
+
+The bars are a waveform, not a bar chart: every bar shares one base and one ceiling, so the outline is whatever the audio is doing rather than a shape drawn in advance. Levels come from twelve log-spaced FFT bands (40 Hz–14 kHz), each measured against its own running mean so steady loud material sits mid-height and transients reach the top. On the way to the screen each band is pulled part-way towards its two neighbours, which turns twelve independently twitching columns into a single moving contour, and peaks land fast while the decay is left to glide.
 
 The pill follows the menu bar, not the Light/Dark setting: on a light menu bar it drops the black capsule and darkens the bars into a mid-dark band of the same hues, so it reads as bars rather than a black blob on white. Settings › **Show island pill background** only applies where there is a pill to draw. `ISLANDBAR_PILL_APPEARANCE=light|dark` forces either rendering, which is the way to see the light one without changing the desktop picture.
 

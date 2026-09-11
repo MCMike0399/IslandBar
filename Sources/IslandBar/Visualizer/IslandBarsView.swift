@@ -6,26 +6,17 @@ struct BarMetrics: Equatable {
     var barWidth: CGFloat
     var gap: CGFloat
     var minHeight: CGFloat
-    /// Full height, reached only by the outermost bars.
+    /// Ceiling shared by every bar. A tapered row — tall at the edges, low in the
+    /// middle — reads as a shape that was drawn once and then filled in, which is the
+    /// opposite of what an audio visualiser does: there the outline *is* the signal,
+    /// so every bar needs the same headroom for the audio to draw with.
     var maxHeight: CGFloat
-    /// How much shorter the middle bar's ceiling is than the edge bars', as a fraction
-    /// of `maxHeight`. The island waveform tapers this way: tall at both ends, low in
-    /// the centre, so the bars read as one shape rather than a bar chart.
-    var centerDip: CGFloat = 0.42
 
     var totalWidth: CGFloat {
         CGFloat(BarLevels.count) * barWidth + CGFloat(BarLevels.count - 1) * gap
     }
 
     var size: CGSize { CGSize(width: totalWidth, height: maxHeight) }
-
-    /// Height ceiling for bar `i`: `maxHeight` at the edges, easing down to
-    /// `maxHeight * (1 - centerDip)` in the middle.
-    func maxHeight(forBar i: Int) -> CGFloat {
-        guard BarLevels.count > 1 else { return maxHeight }
-        let t = CGFloat(i) / CGFloat(BarLevels.count - 1)
-        return maxHeight * (1 - centerDip * sin(.pi * t))
-    }
 
     func barX(_ i: Int) -> CGFloat { CGFloat(i) * (barWidth + gap) }
 }
@@ -34,8 +25,10 @@ struct BarMetrics: Equatable {
 /// layer's bounds height; the render server draws rounded rectangles straight from
 /// the layer properties. There is no gradient-through-mask offscreen pass and no
 /// path to rasterise, which is what the previous CAShapeLayer/CAGradientLayer pair
-/// cost WindowServer sixty times a second. Heights are snapped to device pixels and
-/// a frame that moves nothing by a whole pixel is not committed at all.
+/// cost WindowServer sixty times a second. Heights stay on a continuous scale — the
+/// caps are round, so a fractional height only softens the very tip, and snapping them
+/// to the pixel grid cost more in stair-steps than it bought in crispness — while a
+/// frame that moves nothing by `heightEpsilon` is still not committed at all.
 /// SwiftUI is involved only for the rare changes (palette, playing/idle).
 @MainActor
 final class BarsLayerView: NSView {
@@ -45,7 +38,10 @@ final class BarsLayerView: NSView {
     private let flatLayer = CALayer()
     private var heights: [CGFloat]
     private var flat = true
-    private var scale: CGFloat = 2
+    /// Height change too small to be worth a commit: a tenth of a point sits well
+    /// under a device pixel at any scale, and holding still on it is what keeps a
+    /// sustained note from re-committing sixty times a second.
+    private static let heightEpsilon: CGFloat = 0.1
     /// True when the bars sit on a light menu bar: the idle line darkens with them.
     private(set) var lightBackground = false
     /// False while idle or with Reduce Motion on: incoming levels are ignored and
@@ -111,16 +107,6 @@ final class BarsLayerView: NSView {
     override var intrinsicContentSize: NSSize { metrics.size }
     override var wantsUpdateLayer: Bool { true }
 
-    override func viewDidChangeBackingProperties() {
-        super.viewDidChangeBackingProperties()
-        let next = window?.backingScaleFactor ?? 2
-        guard next != scale else { return }
-        scale = next
-        // Re-snap to the new pixel grid.
-        heights = [CGFloat](repeating: -1, count: BarLevels.count)
-        apply(animating ? levels : .rest)
-    }
-
     private var levels = BarLevels.rest
 
     func setPalette(_ palette: ArtworkPalette) {
@@ -170,10 +156,11 @@ final class BarsLayerView: NSView {
         var changed = false
         for i in 0..<BarLevels.count {
             let level = i < levels.values.count ? CGFloat(levels.values[i]) : 0
-            let raw = max(metrics.minHeight, level * metrics.maxHeight(forBar: i))
-            let snapped = (raw * scale).rounded() / scale
-            if snapped != next[i] {
-                next[i] = snapped
+            let raw = max(metrics.minHeight, level * metrics.maxHeight)
+            // Compared against the height currently on screen, not the previous
+            // target, so the drawn height can never drift more than the epsilon.
+            if abs(raw - next[i]) > Self.heightEpsilon {
+                next[i] = raw
                 changed = true
             }
         }

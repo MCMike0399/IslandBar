@@ -54,17 +54,37 @@ final class SharedBarState: @unchecked Sendable {
 /// for as long as levels keep changing, which is always while music plays.
 /// Easing in the pump caps redraws at `frameRate` and skips frames that would not
 /// visibly move.
+///
+/// Two shapings happen on the way out, and this is the one place the analyzer and the
+/// procedural fallback both publish through, so both get them: a cross-band blend that
+/// makes the bars read as one contour, and an asymmetric ease so peaks land quickly
+/// and decay gently.
 final class BarLevelPump: @unchecked Sendable {
     static let frameRate = 60.0
-    /// Fraction of the remaining distance covered per frame. 0.45 at 60 Hz settles
-    /// in roughly 80 ms, fast enough for beats yet free of 30 Hz stair-steps.
-    private static let easing: Float = 0.45
+    /// Fraction of the remaining distance covered per frame, going up and coming down.
+    /// Attack is quick enough to catch a kick, release slow enough that a bar glides
+    /// back instead of dropping. One symmetric rate rounded every peak off into a mush
+    /// and fought the analyzer's envelope, which already supplies the long tail.
+    private static let attack: Float = 0.62
+    private static let release: Float = 0.32
     private static let settleThreshold: Float = 0.003
+    /// How far each bar is pulled towards the mean of its two neighbours, per frame.
+    /// At 0.45 a band that jumps on its own keeps a little over half its height and
+    /// lifts the bars beside it, so the row reads as a moving contour rather than a bar
+    /// chart. Raising it broadens the hump; at 0 it is the raw spectrum again, where
+    /// neighbouring bars sit at opposite heights.
+    private static let neighborPull: Float = 0.45
 
     private let shared: SharedBarState
     private var timer: DispatchSourceTimer?
     private var lastSecondLog: CFAbsoluteTime = 0
     private var display: [Float] = BarLevels.rest.values
+    /// The shaped copy of `display` that actually gets published, plus one scratch
+    /// buffer to blur into. Kept apart from `display` deliberately: blending back into
+    /// the easing state would re-blur the row every frame and flatten it to its own
+    /// mean, which is a much stronger effect than a single pass.
+    private var shaped: [Float] = BarLevels.rest.values
+    private var scratch: [Float] = [Float](repeating: 0, count: BarLevels.count)
     private let onLevels: @Sendable (BarLevels, Float, Bool) -> Void
     private(set) var isRunning = false
 
@@ -90,12 +110,13 @@ final class BarLevelPump: @unchecked Sendable {
                         moved = true
                     }
                 } else {
-                    self.display[i] += delta * Self.easing
+                    self.display[i] += delta * (delta > 0 ? Self.attack : Self.release)
                     moved = true
                 }
             }
             if moved {
-                self.onLevels(BarLevels(values: self.display), snap.rmsDb, snap.fromTap)
+                self.shape()
+                self.onLevels(BarLevels(values: self.shaped), snap.rmsDb, snap.fromTap)
             }
             if DebugLog.enabled {
                 let now = CFAbsoluteTimeGetCurrent()
@@ -116,13 +137,31 @@ final class BarLevelPump: @unchecked Sendable {
         isRunning = false
     }
 
+    /// One pass of the neighbour blend. Bands from the analyzer are already
+    /// correlated — log-spaced slices of the same spectrum — but it reports each one
+    /// as a deviation from *that band's* running mean, and that is what decorrelates
+    /// them and makes the raw output jump around as twelve separate columns. Ends clamp
+    /// rather than pad with silence, so the outermost bars keep their own level instead
+    /// of being dragged towards zero. The blend is a convex combination, so it cannot
+    /// push a level outside the 0.12…1.0 the publishers have already clamped to.
+    private func shape() {
+        for i in 0..<display.count { shaped[i] = display[i] }
+        for i in 0..<display.count {
+            let left = shaped[max(0, i - 1)]
+            let right = shaped[min(shaped.count - 1, i + 1)]
+            scratch[i] = shaped[i] + ((left + right) * 0.5 - shaped[i]) * Self.neighborPull
+        }
+        for i in 0..<display.count { shaped[i] = scratch[i] }
+    }
+
     /// Drops the eased display back to the rest line and stops the timer. Called when
     /// playback stops: a 60 Hz main-queue timer easing a static line was pure overhead,
     /// and the next `start()` must not ease in from stale heights.
     func rest() {
         display = BarLevels.rest.values
         if isRunning {
-            onLevels(BarLevels.rest, -120, false)
+            shape()
+            onLevels(BarLevels(values: shaped), -120, false)
         }
         stop()
     }
