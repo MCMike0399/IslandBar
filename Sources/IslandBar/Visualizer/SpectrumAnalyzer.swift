@@ -69,8 +69,14 @@ final class SpectrumAnalyzer: @unchecked Sendable {
     /// permission or route problem), which is otherwise invisible from the outside.
     private(set) var samplesRead = 0
 
+    /// Whether the drain timer is live. Owned by the tap queue, like `start()`/`stop()`.
+    /// The tap outlives a pause but the analyzer does not, so the resume path has to be
+    /// able to ask.
+    private(set) var isRunning = false
+
     func start() {
         stop()
+        isRunning = true
         filled = 0
         samplesRead = 0
         envelope = BarLevels.rest.values
@@ -91,6 +97,7 @@ final class SpectrumAnalyzer: @unchecked Sendable {
     func stop() {
         timer?.cancel()
         timer = nil
+        isRunning = false
     }
 
     private func tick() {

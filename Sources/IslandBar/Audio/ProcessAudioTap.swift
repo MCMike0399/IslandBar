@@ -405,6 +405,14 @@ final class TapController: @unchecked Sendable {
         }
 
         if phase.isTapping, tap.isRunning {
+            // Whatever this call decides about the tap, the analyzer has to be draining
+            // it. A pause stops the analyzer and deliberately leaves the tap up, and
+            // `installTap` is the only other thing that starts one — so every early
+            // return below used to leave a live tap feeding nothing: `shared` kept the
+            // last levels the analyzer published and the bars froze for the rest of the
+            // session. It hid behind the crash on the pause path, because the relaunch
+            // that followed built a fresh tap.
+            if !analyzer.isRunning { attachAnalyzer() }
             let stale = !currentTargetsAreAlive()
             if stale {
                 targetLostSince = targetLostSince ?? now
@@ -451,6 +459,19 @@ final class TapController: @unchecked Sendable {
             return
         }
         installTap(targets: targets, source: source, reason: reason)
+    }
+
+    /// Point the analyzer at the running tap and start draining it. Runs on the tap
+    /// queue, which owns `analyzer.isRunning` along with `start()`/`stop()`.
+    ///
+    /// The ring is dropped first because its writer stalls when full rather than
+    /// overwriting (`writeMixedMono` breaks when it catches the reader): a tap that kept
+    /// running through a pause left ~85 ms of audio frozen at the moment of the pause,
+    /// and replaying that on resume is a stutter, not history.
+    private func attachAnalyzer() {
+        analyzer.sampleRate = tap.sampleRate
+        tap.ring.reset()
+        analyzer.start()
     }
 
     private static func pollInterval(for source: TapSource) -> CFAbsoluteTime {
@@ -508,9 +529,7 @@ final class TapController: @unchecked Sendable {
         nextRebuildAt = now + Self.backoffAfterRebuild(rebuildsThisSession)
         rebuildsThisSession += 1
 
-        analyzer.sampleRate = tap.sampleRate
-        tap.ring.reset()
-        analyzer.start()
+        attachAnalyzer()
         onUsingProcedural?(false)
         onTapEvent?("tap source=\(source) targets=\(targets) reason=\(reason) pid=\(session?.pid ?? 0)")
         DebugLog.line(

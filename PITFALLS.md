@@ -118,6 +118,49 @@ AUTHREQ_ATTRIBUTION: attribution={responsible={… identifier=node-… }, access
 Always launch through LaunchServices — `open dist/IslandBar.app` or
 `open --env ISLANDBAR_DEBUG=1 dist/IslandBar.app` — when you care about permissions.
 
+### The tap outlives a pause; the analyzer does not
+
+A pause deliberately keeps the process tap (recreating one is a fresh recording session as
+far as macOS is concerned) but stops the analyzer, so an idle pill costs nothing. Resuming
+goes through `renewTap`, which decides the existing tap is still good and returns early —
+and `installTap` is the only thing that calls `analyzer.start()`. The result was a live tap
+feeding nothing: `SharedBarState` kept the last levels the analyzer published, the pump
+eased to them and settled, and the bars sat frozen for the rest of the session while audio
+played.
+
+**Recognize it:** `bandLevels=[…] rms=… fromTap=true` repeating with *identical* values
+every second, and **no `tap created` line after the resume**. `rms=-240.0` with every band
+at 0.12 is the giveaway — that is the digital silence captured at the instant of the pause,
+replayed forever. A relaunch fixes it, which is why it looks intermittent.
+
+**Check it** — play, pause past the output-quiet grace, resume, and count distinct levels:
+
+```bash
+grep -o "rms=[-0-9.]*" ~/Library/Logs/IslandBar/debug.log | tail -20 | sort -u | wc -l
+```
+
+One distinct value while `fromTap=true` means frozen; live audio gives a dozen.
+
+The invariant is now asserted in the one place that decides to keep a tap: if we are playing
+and holding a running tap, the analyzer is draining it (`attachAnalyzer`, which also drops
+the ring — `writeMixedMono` stalls when full rather than overwriting, so the tap left ~85 ms
+of stale audio queued at the moment of the pause).
+
+**Driving playback for a test** without touching the browser — the vendored adapter's perl
+helper takes MediaRemote commands directly (absolute paths only; Apple's perl refuses a
+relative dylib):
+
+```bash
+APP=dist/IslandBar.app; A="$PWD/$APP"
+/usr/bin/perl "$A/Contents/Resources/MediaRemoteAdapter_MediaRemoteAdapter.bundle/Contents/Resources/run.pl" \
+  "$A/Contents/Frameworks/libMediaRemoteAdapter.dylib" play   # or pause, get, next_track
+```
+
+Gate any such test on `isPlaying=false applied` actually appearing in the log: a browser
+pause usually does **not** reach the store straight away, because `effectivePlaying` keeps
+the session playing while the app is still producing output (Arc holds its output unit open
+for a few seconds). A pause shorter than that grace tests nothing.
+
 ## Diagnosing "the bars are not moving"
 
 Read the debug log (`ISLANDBAR_DEBUG=1`, `~/Library/Logs/IslandBar/debug.log`) in this order:
