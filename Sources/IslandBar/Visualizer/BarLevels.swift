@@ -59,6 +59,12 @@ final class SharedBarState: @unchecked Sendable {
 /// procedural fallback both publish through, so both get them: a cross-band blend that
 /// makes the bars read as one contour, and an asymmetric ease so peaks land quickly
 /// and decay gently.
+///
+/// Two queues touch this object and the split is deliberate:
+/// - `start()`, `stop()`, `rest()` and `isRunning` belong to the caller (the tap queue).
+/// - `display`, `shaped`, `scratch` and **every `onLevels` call** belong to the main
+///   queue. `onLevels` is invoked on the main queue, always: the app delegate reads the
+///   store under `MainActor.assumeIsolated`, which traps anywhere else.
 final class BarLevelPump: @unchecked Sendable {
     static let frameRate = 60.0
     /// Fraction of the remaining distance covered per frame, going up and coming down.
@@ -85,6 +91,7 @@ final class BarLevelPump: @unchecked Sendable {
     /// mean, which is a much stronger effect than a single pass.
     private var shaped: [Float] = BarLevels.rest.values
     private var scratch: [Float] = [Float](repeating: 0, count: BarLevels.count)
+    /// Always called on the main queue. See the queue split in the type's doc comment.
     private let onLevels: @Sendable (BarLevels, Float, Bool) -> Void
     private(set) var isRunning = false
 
@@ -157,12 +164,22 @@ final class BarLevelPump: @unchecked Sendable {
     /// Drops the eased display back to the rest line and stops the timer. Called when
     /// playback stops: a 60 Hz main-queue timer easing a static line was pure overhead,
     /// and the next `start()` must not ease in from stale heights.
+    ///
+    /// This one runs on the tap queue, so the frame state and the closing `onLevels` are
+    /// handed to the main queue like every other frame. Doing that work inline trapped in
+    /// the delegate's `MainActor.assumeIsolated` (a crash on the first pause of every
+    /// session) and raced the running timer for `display`. `stop()` stays synchronous so
+    /// the `pump.isRunning` the tap queue reads next is already false, and the main queue
+    /// is serial, so this block is ahead of any timer a following `start()` resumes.
     func rest() {
-        display = BarLevels.rest.values
-        if isRunning {
-            shape()
-            onLevels(BarLevels(values: shaped), -120, false)
-        }
+        let wasRunning = isRunning
         stop()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.display = BarLevels.rest.values
+            guard wasRunning else { return }
+            self.shape()
+            self.onLevels(BarLevels(values: self.shaped), -120, false)
+        }
     }
 }

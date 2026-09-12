@@ -131,6 +131,53 @@ Read the debug log (`ISLANDBAR_DEBUG=1`, `~/Library/Logs/IslandBar/debug.log`) i
 5. `procedural driver active reason=…` — the tap was abandoned on purpose; the reason string
    says why (`permission-denied`, `forced-procedural`, `io-timeout`, `no-targets`).
 
+## Diagnosing "the icon vanished and came back"
+
+That is a crash plus the relaunch watchdog, not a drawing bug. The watchdog polls every 2 s
+and sleeps 1 s before reopening, so a crash reads as a 3–5 s gap in the menu bar. Confirm it
+from the crash reports rather than the debug log — the process is gone before it can log:
+
+```bash
+ls -lat ~/Library/Logs/DiagnosticReports/ | grep IslandBar
+cat ~/Library/Application\ Support/IslandBar/relaunches.log   # epoch stamps, pruned to 10 min
+```
+
+If the icon stays gone, the watchdog hit its crash-loop cap (5 relaunches in 10 minutes) and
+stopped re-arming; `open dist/IslandBar.app` brings it back.
+
+`.ips` files are two JSON documents — a header line, then the body. Symbolicated frames are
+already in them, so no `atos` run is needed:
+
+```bash
+python3 -c 'import json,sys
+f=open(sys.argv[1]); f.readline(); d=json.load(f); imgs=d["usedImages"]
+for fr in d["threads"][d["faultingThread"]]["frames"]:
+    i=fr.get("imageIndex")
+    print(imgs[i]["name"] if i is not None else "?", fr.get("symbol"))' <report>.ips
+```
+
+### A main-queue callback invoked from the tap queue
+
+`EXC_BREAKPOINT` in `dispatch_assert_queue_fail` under `MainActor.assumeIsolated` means a
+closure that is documented as main-queue ran somewhere else. The delegate's `onLevels`
+handler skips the actor hop with `assumeIsolated` because the pump's 60 Hz timer is a
+`.main` dispatch source — correct for that path, and a trap for any other.
+
+`BarLevelPump.rest()` broke it: `TapController.applyLocked` calls it from
+`dev.burbuja-lab.islandbar.tap` on every pause and every session end, and it published one
+final frame inline. Every playing session therefore crashed on its first pause — which on a
+video with ads or a seek is constantly, and the watchdog kept relaunching into it. Shipped
+in 0.2.0, fixed in the release after 0.3.0.
+
+The general shape: `@unchecked Sendable` puts the queue contract in a comment, and a
+`@Sendable` closure compiles the same whichever queue it runs on, so nothing catches this
+until it traps at runtime. When a class is touched from two queues, say in its doc comment
+which fields and callbacks belong to which — `BarLevelPump` now does — and keep the
+cross-queue methods to a `stop()`-style flag flip plus a `DispatchQueue.main.async` block.
+`assumeIsolated` checks the dispatch queue, so hop with `DispatchQueue.main.async`, not
+`Task { @MainActor }`: the async block also keeps FIFO order with the timer a following
+`start()` resumes, which is what stops a pause→play from easing in from stale heights.
+
 ## Churn bookkeeping
 
 Every tap creation is a **recording session** as far as macOS is concerned: it writes a
