@@ -4,9 +4,14 @@
 #   Scripts/release.sh <version> [--notes <file>] [--dry-run]
 #
 # Steps: stamp Resources/Info.plist, ./build.sh, zip the bundle with ditto, sign the zip
-# with the Ed25519 release key, commit "Release vX.Y.Z", tag, push main + tag, and publish
-# a GitHub release with the zip and its .sig attached. --dry-run stops after
+# with the Ed25519 release key, commit "Release vX.Y.Z [skip ci]", tag, push main + tag,
+# and publish a GitHub release with the zip and its .sig attached. --dry-run stops after
 # signing and leaves the tree untouched (build artefacts land in dist/ as usual).
+#
+# The "[skip ci]" matters: .github/workflows/release.yml cuts a release for every push to
+# main, and without it a release cut by hand would immediately be followed by a second,
+# redundant one from CI. (A push made with the workflow's own GITHUB_TOKEN starts no run
+# at all, so CI cutting a release does not need the marker to stop feeding itself.)
 #
 # The private key lives outside the repo (default ~/.config/islandbar/update-signing.key,
 # override with ISLANDBAR_SIGNING_KEY). Its public half is compiled into
@@ -142,7 +147,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
 fi
 
 git add Resources/Info.plist
-git commit -q -m "Release $TAG"
+git commit -q -m "Release $TAG [skip ci]"
 git tag -a "$TAG" -m "IslandBar $VERSION"
 git push -q origin main "$TAG"
 if ! gh release create "$TAG" "$ARCHIVE" "$ARCHIVE.sig" \

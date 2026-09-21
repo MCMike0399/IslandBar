@@ -1,0 +1,136 @@
+name: Release
+
+# Cut a signed release on every push to main, and publish it.
+#
+# This runs on the self-hosted runner on the work Mac (macbookpro-1), and signs with the
+# Ed25519 key held in the ISLANDBAR_SIGNING_KEY repository secret. All of the release logic
+# — version stamping, the build, the zip, the signature, the key-rotation guard — stays in
+# Scripts/release.sh, so there is exactly one release path whether it runs here or by hand.
+# See AGENTS.md ("Releases") and PITFALLS.md ("Cutting a release in CI").
+#
+# SECURITY: this repository is public, so this runner is reachable only by `push` to main
+# and by a manual dispatch — both need write access. Never add a `pull_request` trigger:
+# that would run an outside contributor's code, with the signing key in its environment, on
+# a machine that is not a throwaway VM.
+#
+# To skip a release for one commit, put `[skip ci]` in its message.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to cut (X.Y.Z). Empty bumps the patch of the newest tag."
+        type: string
+        required: false
+      dry_run:
+        description: "Build and sign only — never commit, tag or publish."
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: [self-hosted, macOS, ARM64, islandbar-release]
+    steps:
+      - name: Put Homebrew on PATH
+        run: echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          # release.sh needs every tag (for the notes range, and to read the key the last
+          # release shipped) and the full commit count, which is the build number.
+          fetch-depth: 0
+
+      - name: Make sure origin/main and every tag are present
+        run: |
+          set -euo pipefail
+          git config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+          git fetch --tags --force origin
+          git rev-parse --verify origin/main >/dev/null
+          git describe --tags --abbrev=0 --match 'v*' >/dev/null
+
+      - name: Is there something to release?
+        id: decide
+        run: |
+          set -euo pipefail
+          # A manual dispatch is deliberate, so it always proceeds.
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]] && git tag --points-at HEAD | grep -q '^v[0-9]'; then
+            echo "HEAD already carries a release tag — nothing to cut."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Work out the version
+        id: version
+        if: steps.decide.outputs.skip == 'false'
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${INPUT_VERSION#v}"
+          if [[ -z "${version}" ]]; then
+            latest="$(git tag --list 'v*' --sort=-v:refname | sed -n 1p)"
+            latest="${latest#v}"
+            if [[ ! "${latest}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::no vX.Y.Z tag to bump from (found '${latest}')"
+              exit 1
+            fi
+            IFS=. read -r major minor patch <<< "${latest}"
+            version="${major}.${minor}.$(( patch + 1 ))"
+          fi
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'${version}' is not a X.Y.Z version"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Cutting **${version}**" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write the signing key
+        id: key
+        if: steps.decide.outputs.skip == 'false'
+        env:
+          SIGNING_KEY: ${{ secrets.ISLANDBAR_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${SIGNING_KEY}" ]]; then
+            echo "::error::the ISLANDBAR_SIGNING_KEY secret is not set, so nothing can be signed"
+            exit 1
+          fi
+          # release.sh reads the path named by ISLANDBAR_SIGNING_KEY; keep it out of the
+          # runner's home and off the repository checkout.
+          key="${RUNNER_TEMP}/islandbar-signing.key"
+          ( umask 077; printf '%s\n' "${SIGNING_KEY}" > "${key}" )
+          echo "key=${key}" >> "$GITHUB_OUTPUT"
+
+      - name: Cut the release
+        if: steps.decide.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISLANDBAR_SIGNING_KEY: ${{ steps.key.outputs.key }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            ./Scripts/release.sh "${VERSION}" --dry-run
+          else
+            ./Scripts/release.sh "${VERSION}"
+          fi
+
+      - name: Remove the signing key
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/islandbar-signing.key"
