@@ -4,6 +4,82 @@ Hard-won, non-obvious traps in this codebase. Each one cost real debugging time;
 entry says how to recognize it and how to check it. If you hit something new, add it here
 instead of leaving it in a chat log.
 
+## Popover
+
+### `NSPopover.animates` slides the card's contents across the screen
+
+The open animation grows the *window* from the status item — 123x94, 238x182, 366x279 — and
+because the hosting controller has `sizingOptions = []`, the card inside is laid out at its
+final size from the first frame. So nothing scales: the full-size card is drawn and merely
+revealed through a growing window. And the window's origin travels as it grows (x went -707,
+-764, -828 for a 340 pt card), so the contents visibly **slide** across the screen on the way
+in. The same animation on a content-size change drags the card's contents behind the new
+height when a section opens.
+
+At 300x150 this was small enough to pass for an animation. At 340 wide and 279 tall it reads
+as the card's contents jumping, which is what it is. `popover.animates = false`.
+
+**Check it** by sampling `CGWindowListCopyWindowInfo` every 40 ms while the popover opens:
+intermediate frames mean the animation is on. With it off there is exactly one frame, at the
+final size.
+
+### Verifying a vibrant popover needs a *screen* capture, not a window capture
+
+`screencapture -o -l <window id>` captures the window's own backing. An `NSVisualEffectView`
+with `blendingMode = .behindWindow` is composited by WindowServer from what is *behind* the
+window, which is not in that backing — so the whole vibrant area comes back flat grey and
+every backdrop defect looks fixed.
+
+Use `screencapture -x -R<x>,<y>,<w>,<h>` over the popover's frame instead. Hours were spent
+declaring a backdrop bug fixed against captures that could not have shown it.
+
+### `NSPopover` owns its content view's frame; setting it yourself narrows the card
+
+`NSPopover` lays its content view out into an area a little *wider* than the `contentSize`
+it was given — measured at 12 pt on macOS 26. Code that sets both:
+
+```swift
+popover.contentSize = size
+popover.contentViewController?.view.frame = NSRect(origin: .zero, size: size)   // wrong
+```
+
+works on the first show (the popover sized the view itself) and goes wrong on the first
+resize, when the assignment shrinks the view back to `size`.
+
+While the content view was an `NSHostingView` whose SwiftUI root filled whatever it was
+given, this was invisible. Once the content view is the blurred backdrop, the missing strip
+is unblurred popover background — a lighter band down the right-hand edge that appears only
+after the card has resized once.
+
+**Check it** by sampling one horizontal line near the right edge in both states: the colour
+transitions must land at the same x. Set `contentSize` and nothing else.
+
+### The blurred backdrop cannot be a representable in a card that resizes
+
+The expanded card's height is set imperatively (`NSPopover.contentSize` plus the content
+view's frame, in `StatusItemController.resizeCard`), because the SwiftUI root must not
+re-measure the popover on every bar frame. An `NSVisualEffectView` hosted *inside* that
+SwiftUI tree is resized by a layout pass that lands **after** the window has already grown.
+
+The result is intermittent and reads as a completely different bug. Opening the output list
+grows the card by 66 pt; the blur stays at its old height; and the strip below it shows the
+popover's raw backing instead of blurred desktop. Because a panel's dark fill sits on top of
+that strip, the Sound panel looks like it has been **cut off below its slider**, with the
+device rows floating outside it.
+
+**Recognize it:** the rows are in the right place and the card is the right height — only the
+region below the old height is wrong. A `GeometryReader` probe on the panel reports the
+correct height (`139.0`), which rules out layout and points at drawing.
+
+**Check it:** sample one pixel column in the card's 14 pt outer padding, above and below the
+boundary. The backdrop must be the same colour at both; when the blur has lagged, the lower
+sample shows whatever window is behind the popover, so it varies horizontally with what is
+back there (dark over a terminal, light over a browser).
+
+The fix is that the blur is the popover's own `contentViewController.view`, with the hosting
+view added as an autoresizing subview. `resizeCard` then resizes the blur in the same
+statement as the window, and no layout pass is involved.
+
 ## Audio capture
 
 ### The tap UID must be fresh on every creation
@@ -160,6 +236,78 @@ Gate any such test on `isPlaying=false applied` actually appearing in the log: a
 pause usually does **not** reach the store straight away, because `effectivePlaying` keeps
 the session playing while the app is still producing output (Arc holds its output unit open
 for a few seconds). A pause shorter than that grace tests nothing.
+
+## Per-app volume
+
+### A `.muted` tap mutes nothing until its aggregate is *started*
+
+Creating a `CATapDescription` with `muteBehavior = .muted` and calling
+`AudioHardwareCreateProcessTap` looks like it should silence the app. It does not. The mute
+engages only once that tap sits in an aggregate device whose IO proc has been started with
+`AudioDeviceStart`.
+
+Measured with a microphone against a steady tone: tap created but attached to nothing gave
+`f440=0.013515` against a `0.013491` baseline — no change at all.
+
+**Recognize it:** `mixer tap created` in the log, no `mixer engine started`, and the app is
+still audible.
+**Check it:** there is no cheap "just mute it" path — mute costs exactly what volume costs,
+which is why `AudioMixer` treats mute as gain 0 on the same fader rather than as a separate
+mechanism.
+
+### `kAudioAggregateDeviceTapAutoStartKey` defers the mute
+
+The visualizer's aggregate sets it to `true`, and should. The mixer's aggregate must **not**.
+The key makes `AudioDeviceStart` wait for the first tapped process to produce audio, which
+defers the device start — and with it the mute. A mute click would appear to do nothing
+until the app next happened to make a sound.
+
+**Recognize it:** muting a paused or quiet app has no effect, then takes effect later.
+**Check it:** `MixerEngine` omits the key deliberately and comments why; copying
+`ProcessAudioTap.start()` wholesale is how it gets reintroduced.
+
+### Verifying a mute with another tap lies
+
+A tap reads a pre-mute mix point. A second tap watching an app that a `.muted` tap has
+silenced still reports it at **full amplitude**, while the speakers are provably silent.
+
+**Recognize it:** a probe that taps its way to "the mute did not work" while the room is quiet.
+**Check it:** only an acoustic measurement proves a mute. The corollary is load-bearing and
+deliberate: the visualizer's `.unmuted` tap keeps receiving a muted app's audio, so the pill's
+bars keep animating for an app the mixer has silenced.
+
+### `kAudioProcessPropertyDevices` answers only in the output scope
+
+Asked in `kAudioObjectPropertyScopeGlobal` it returns an empty array for **every** process,
+including ones that are audibly playing — which reads as "nothing is using audio" rather than
+as an error.
+
+**Check it:** `swift Tools/mixerprobe.swift` prints both scopes per process. Output scope is
+also what reduces ~35 process objects to the 2-3 apps actually holding an output, with no
+denylist needed.
+
+### There is no per-process volume or mute property
+
+All six `kAudioProcessProperty*` selectors (`ppid`, `pbid`, `pdv#`, `pir?`, `piri`, `piro`)
+are read-only in every scope. `kAudioHardwarePropertyProcessIsAudible` exists only on the
+system object and mutes *the calling process*. Per-app level is therefore not a property
+write; it is "sever the app with a `.muted` tap, then re-render its samples yourself".
+
+### Retiring a slot is an ordered pair of writes
+
+Returning an app to normal means dropping its gain to 0 **first**, then flipping its tap's
+`muteBehavior` to `.unmuted`. Do it the other way round and both the original and the
+re-rendered copy are audible for a moment, which comb-filters: measured at 56% of baseline
+with a suckout at the test tone.
+
+**Recognize it:** a brief hollow or phasey sound when a fader returns to full.
+
+### `prefix3` is unsound for grouping WebKit processes
+
+`AudioProcessRegistry.matches` compares three-component bundle prefixes, which is right for
+matching a now-playing session. It cannot group mixer rows: two simultaneous processes both
+reporting `com.apple.WebKit.GPU` belonged to Safari and to WebThumbnailExtension, and no
+string function separates them. Only `responsibility_get_pid_responsible_for_pid` does.
 
 ## Diagnosing "the bars are not moving"
 
@@ -340,6 +488,50 @@ for `tapSilenceGrace` (1.2 s) ends the override without waiting for the flag. Th
 playing session go idle. The flag + `outputQuietGrace` path is still there as the
 fallback when no tap exists (procedural mode, denied capture).
 
+## Full screen
+
+### Animating a status item holds the menu bar open
+
+The menu bar auto-hides in a full-screen space. It does not while a status item is redrawing
+sixty times a second: the bar comes down and stays down, and the window's title bar comes
+with it — the app is squeezed from `0,0 1728x1117` to `0,33 1728x1084` for as long as
+something plays. It looks like the app being covered. It is the pill holding the bar open.
+
+Measured with a full-screen window and the pointer parked at the middle of the screen,
+polling `CGWindowListCopyWindowInfo` for the WindowServer's `Menubar` window every 500 ms:
+
+| IslandBar | audio | menu bar over 12 s |
+| --- | --- | --- |
+| quit | playing | hidden from the first sample |
+| running, idle | none | hidden after 10 s |
+| running | playing | **never hidden** |
+
+The gate is `MenuBarAutoHide`. Where the bar hides itself — a full-screen space, or a desktop
+whose owner set auto-hide in Settings — the bars animate only while the pointer is in the menu
+bar, which is the only time anyone can see them. Everywhere else nothing changes.
+
+**Recognize it:** a full-screen window whose height is the screen's less the menu bar, with
+its title bar showing, while music plays.
+**Check it** with the poll above, or in the log:
+
+```
+menu bar auto-hide=on
+pill animation allowed=false        # ...and the bar goes back up
+```
+
+### There is no public API for "is this space full screen"
+
+`NSScreen.visibleFrame` does not change in a full-screen space (measured: 1084 pt of a
+1117 pt screen, in and out), `NSMenu.menuBarVisible()` stays `true`, and the WindowServer's
+`Menubar` window only reports what the bug is already breaking. So `MenuBarAutoHide` reads the
+space instead: every ordinary layer-0 window on it belongs to one application, and that
+application has a window as wide as a display whose height is the display's or the display's
+less the menu bar. Both heights are needed — the short one *is* the held-open state.
+
+The inset comes from `screen.frame.maxY - screen.visibleFrame.maxY`, never from
+`NSStatusBar.system.thickness`: on a notched Mac the bar is 33 pt and that property still
+answers 24, and the nine points made every full-screen window miss its match.
+
 ## Self-update
 
 ### A release key must ship before it signs anything
@@ -371,3 +563,30 @@ key the previous release did not embed must be signed with the *previous* key. T
 then ships the new key, and the one after it can sign with it. If the old key is missing the
 script refuses, which is the correct outcome — the rotation cannot be completed without it.
 **Never delete the previous private key** until a release carrying the new one is published.
+
+### A fork that keeps upstream's feed updates itself *off* the fork
+
+`UpdateFeed.repository` names the repository whose releases a build installs, and it is
+compiled in. A fork that leaves it pointing at the repository it was forked from has an
+updater that does exactly what it was told: twenty seconds after launch it reads
+upstream's latest release, sees a version newer than the fork's own `Info.plist`, verifies
+the archive against a key both trees share — and swaps upstream's bundle over the fork's
+app. Nothing fails, so nothing is reported. A fork hit this on 2026-09-20: v0.3.6 landed
+on top of its build and took a whole feature with it.
+
+It is quiet in the worst way: the app is *in the same place*, launches, and works. Only its
+features are someone else's. A build sitting in `dist/` is no safer than an installed one,
+because the installer replaces the bundle the running process was launched from.
+
+**Recognize it:** the bundle's `CFBundleShortVersionString` is a version the fork never cut,
+and a feature you wrote is gone from a bundle newer than your last build.
+
+```bash
+/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' dist/IslandBar.app/Contents/Info.plist
+git tag --list --points-at HEAD     # no tag here means this tree released nothing
+```
+
+Nothing is lost when it happens — the source is in git, and a rebuild restores the fork.
+**Point `repository` at the fork's own repository** and take upstream's work through `git
+merge upstream/main` instead, which is the only path that keeps the code and the binary the
+same thing.

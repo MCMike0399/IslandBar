@@ -5,6 +5,14 @@ enum DebugLog {
     static let forceProcedural = ProcessInfo.processInfo.environment["ISLANDBAR_FORCE_PROCEDURAL"] == "1"
     /// Pretend browsers publish no metadata, to exercise the tab-reading fallback on demand.
     static let ignoreBrowserMetadata = ProcessInfo.processInfo.environment["ISLANDBAR_IGNORE_BROWSER_METADATA"] == "1"
+    /// `ISLANDBAR_MIXER=0`: never start the mixer. No app list is polled, no row renders, and
+    /// the expanded card stays at its pre-mixer size. The first bisection step for any report
+    /// that blames the mixer, and the escape hatch for a user whose audio misbehaves.
+    static let mixerDisabled = ProcessInfo.processInfo.environment["ISLANDBAR_MIXER"] == "0"
+    /// `ISLANDBAR_MIXER_MUTE_ONLY=1`: clamp every gain to 0 or 1, so no app is ever re-rendered
+    /// at a partial level. Isolates the fader from the mute when one of them misbehaves, and
+    /// avoids the added latency on outputs where it is worst.
+    static let mixerMuteOnly = ProcessInfo.processInfo.environment["ISLANDBAR_MIXER_MUTE_ONLY"] == "1"
     /// `ISLANDBAR_PILL_APPEARANCE=light|dark`: render the pill as if the menu bar were that
     /// light, so both variants can be compared on one machine. The menu bar's own material
     /// follows the wallpaper, so this is the only way to see the light pill without

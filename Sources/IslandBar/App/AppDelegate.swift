@@ -9,6 +9,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var preferences: Preferences!
     private var monitor: NowPlayingMonitor!
     private var tapController: TapController!
+    private var mixer: AudioMixer!
+    private var system: SystemAudioController!
     private var statusItem: StatusItemController!
     private var settings: SettingsWindowController!
     private var updater: UpdateController!
@@ -22,6 +24,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         preferences = Preferences()
         store = NowPlayingStore(barCount: preferences.visualizerBarCount)
         let registry = AudioProcessRegistry()
+        // Deliberately the same registry the monitor and tap controller use. A second one
+        // would double every property-listener registration, and `removeListeners()` only
+        // removes its own.
+        mixer = AudioMixer(registry: registry)
+        system = SystemAudioController()
         let shared = SharedBarState()
         monitor = NowPlayingMonitor(store: store, registry: registry, shared: shared)
         updater = UpdateController(preferences: preferences)
@@ -53,9 +60,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         statusItem = StatusItemController(
-            store: store, preferences: preferences, settings: settings, updater: updater
+            store: store,
+            preferences: preferences,
+            mixer: mixer,
+            system: system,
+            settings: settings,
+            updater: updater
         )
         tapController.start()
+        mixer.start()
+        system.start()
         monitor.start()
         observeStore()
         updater.start()
@@ -67,6 +81,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             Task { @MainActor in
                 self?.statusItem.showReopenSafety()
+            }
+        }
+
+        if DebugLog.enabled {
+            DistributedNotificationCenter.default().addObserver(
+                forName: IslandBarID.debugTogglePopoverNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.statusItem.debugTogglePopover()
+                }
             }
         }
 
@@ -101,6 +127,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         watchdog.disarm()
         monitor.stop()
+        // Before the tap controller, and synchronous: every mixer tap must be destroyed
+        // before the process exits, or an app is left muted with nothing left to unmute it.
+        mixer.stop()
+        system.stop()
         tapController.stop()
     }
 
@@ -120,6 +150,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 store.barLevels = BarLevels.rest(count: prefs.barCount)
             }
             if session != lastAppliedSession || playing != lastAppliedPlay {
+                // The mixer keeps this app's row open across a pause, so the card's hero
+                // tile keeps a working fader. It is wired here because the mixer has no
+                // view of Now Playing and this is already the one place that watches it.
+                mixer.setNowPlaying(bundleID: session?.bundleID, pid: session?.pid ?? 0)
                 lastAppliedSession = session
                 lastAppliedPlay = playing
                 if !playing {

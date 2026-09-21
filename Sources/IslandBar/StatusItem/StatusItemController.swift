@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import QuartzCore
 import SwiftUI
 
 final class PassthroughHostingView<Content: View>: NSHostingView<Content> {
@@ -10,10 +11,20 @@ final class PassthroughHostingView<Content: View>: NSHostingView<Content> {
 final class StatusItemController: NSObject {
     private let store: NowPlayingStore
     private let preferences: Preferences
+    private let mixer: AudioMixer
+    private let system: SystemAudioController
     private let statusItem: NSStatusItem
+    /// Owned here so it outlives every rebuild of the hosted root view: a fresh instance
+    /// per rebuild would take its first reading as committed and let the ringing back in.
+    private let menuBarAppearance = MenuBarAppearance()
+    private let menuBarAutoHide = MenuBarAutoHide()
     private let popover = NSPopover()
     private var hosting: PassthroughHostingView<AnyView>?
     private var hostedHeight: CGFloat = 0
+    /// Tallest the card's fixed sections have been since it opened. Everything except the
+    /// output list only ever grows while the popover is up, so a source cannot vanish from
+    /// under a fader mid-drag. Reset on every open.
+    private var baseHeightFloor: CGFloat = 0
     private let settings: SettingsWindowController
     private let updater: UpdateController
     /// The slot's width follows the pill: full while playing, contracted around the idle
@@ -32,11 +43,15 @@ final class StatusItemController: NSObject {
     init(
         store: NowPlayingStore,
         preferences: Preferences,
+        mixer: AudioMixer,
+        system: SystemAudioController,
         settings: SettingsWindowController,
         updater: UpdateController
     ) {
         self.store = store
         self.preferences = preferences
+        self.mixer = mixer
+        self.system = system
         self.settings = settings
         self.updater = updater
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -55,6 +70,8 @@ final class StatusItemController: NSObject {
             CompactIslandView(buttonHeight: height)
                 .environment(store)
                 .environment(preferences)
+                .environment(menuBarAppearance)
+                .environment(menuBarAutoHide)
         )
         let view = PassthroughHostingView(rootView: root)
         // The pill has a fixed size. Without this, NSHostingView re-runs
@@ -80,7 +97,15 @@ final class StatusItemController: NSObject {
 
         popover.behavior = .transient
         popover.delegate = self
-        popover.contentSize = ExpandedIslandMetrics.size
+        // No animation, ever. `NSPopover` animates by growing the *window* from the status
+        // item while the card inside is already laid out at its final size, so the content
+        // is drawn full-size and merely revealed — and because the window's origin travels
+        // as it grows, the whole card visibly slides across the screen on the way in. The
+        // old card was small enough to get away with it; this one is twice the height and
+        // it reads as the contents jumping. The same animation on a content-size change
+        // drags the card's contents behind the new height when the output list opens.
+        popover.animates = false
+        popover.contentSize = ExpandedIslandMetrics.idleSize
         // The card is built on first open (see togglePopover); a hosting tree that may
         // never be shown is not worth keeping resident.
 
@@ -98,6 +123,25 @@ final class StatusItemController: NSObject {
 
     private func startObserving() {
         tick()
+        layoutTick()
+    }
+
+    /// Deliberately separate from `tick()`. Folding the card's layout inputs into that read
+    /// set would re-run `applyPresence` and `applyVisibility` — which reflow the menu bar
+    /// slot — every time an app starts playing or the output list is opened.
+    private func layoutTick() {
+        withObservationTracking {
+            // Read unconditionally: `resizeCard` returns early while the popover is closed,
+            // and a tracking closure that reads nothing is never called again.
+            _ = currentPlan()
+            resizeCard()
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { self?.layoutTick() }
+        }
+    }
+
+    private func currentPlan() -> SourcePlan {
+        SourcePlan.make(session: store.session, mixer: mixer, system: system)
     }
 
     private func tick() {
@@ -170,6 +214,8 @@ final class StatusItemController: NSObject {
                 CompactIslandView(buttonHeight: height)
                     .environment(store)
                     .environment(preferences)
+                    .environment(menuBarAppearance)
+                    .environment(menuBarAutoHide)
             )
         }
     }
@@ -183,28 +229,97 @@ final class StatusItemController: NSObject {
         }
     }
 
+    /// See `IslandBarID.debugTogglePopoverNotification`.
+    func debugTogglePopover() {
+        togglePopover()
+    }
+
     private func togglePopover() {
         guard let button = statusItem.button else { return }
         if popover.isShown {
             closePopoverIfShown()
         } else {
+            mixer.setPopoverOpen(true)
+            system.setPopoverOpen(true)
+            baseHeightFloor = 0
+            popover.contentSize = ExpandedIslandMetrics.size(for: currentPlan())
             popover.contentViewController = makeExpandedController()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             installClickAwayMonitors()
         }
     }
 
-    /// The card has a fixed size. Without clearing `sizingOptions` the hosting view
-    /// re-measures the popover frame on every bar frame while the popover is open.
-    private func makeExpandedController() -> NSHostingController<some View> {
-        let controller = NSHostingController(
+    /// The card is sized imperatively, here and in `resizeCard`. Without clearing
+    /// `sizingOptions` the hosting view re-measures the popover frame on every bar frame
+    /// while the popover is open.
+    ///
+    /// The blurred backdrop is an `NSVisualEffectView` here rather than a representable
+    /// inside the SwiftUI tree, and it is the popover's own view so autoresizing carries
+    /// the frame straight to it. As a representable it was resized by a SwiftUI layout
+    /// pass that lands *after* the popover has already grown, so opening the output list
+    /// left the blur at its old height and the strip below it showed the window's raw
+    /// backing — which read as the Sound panel being cut off below its slider.
+    private func makeExpandedController() -> NSViewController {
+        let host = NSHostingController(
             rootView: ExpandedIslandView()
                 .environment(store)
                 .environment(preferences)
+                .environment(mixer)
+                .environment(system)
         )
-        controller.sizingOptions = []
-        controller.view.frame = NSRect(origin: .zero, size: ExpandedIslandMetrics.size)
+        host.sizingOptions = []
+
+        let backdrop = NSVisualEffectView(
+            frame: NSRect(origin: .zero, size: ExpandedIslandMetrics.size(for: currentPlan()))
+        )
+        backdrop.material = .hudWindow
+        backdrop.blendingMode = .behindWindow
+        backdrop.state = .active
+        backdrop.appearance = NSAppearance(named: .vibrantDark)
+        backdrop.wantsLayer = true
+        backdrop.layer?.cornerRadius = 14
+        backdrop.layer?.masksToBounds = true
+        backdrop.autoresizesSubviews = true
+        backdrop.autoresizingMask = [.width, .height]
+
+        host.view.frame = backdrop.bounds
+        host.view.autoresizingMask = [.width, .height]
+        backdrop.addSubview(host.view)
+
+        let controller = NSViewController()
+        controller.view = backdrop
+        controller.addChild(host)
         return controller
+    }
+
+    /// The popover's height and its hosting view's frame are the only two consumers of the
+    /// card height, and they are always assigned together here.
+    private func resizeCard() {
+        guard popover.isShown else { return }
+        let plan = currentPlan()
+        // Monotonic in its fixed sections. A row vanishing under a fader mid-drag is the
+        // worst thing this card can do, so those only grow until the popover closes. The
+        // output list is the user's own doing, so it is allowed to fold away again.
+        baseHeightFloor = max(baseHeightFloor, ExpandedIslandMetrics.baseHeight(for: plan))
+        let size = NSSize(
+            width: ExpandedIslandMetrics.width,
+            height: baseHeightFloor + ExpandedIslandMetrics.pickerHeight(for: plan)
+        )
+        guard size != popover.contentSize else { return }
+        DebugLog.line(
+            "card resize \(Int(popover.contentSize.height)) -> \(Int(size.height)) "
+                + "hero=\(plan.hasHero) heroFader=\(plan.heroRow != nil) others=\(plan.others.count) "
+                + "picking=\(plan.isPickingOutput) devices=\(plan.outputDeviceCount) floor=\(Int(baseHeightFloor))"
+        )
+        // `contentSize` only. The content view's frame belongs to `NSPopover`, which lays
+        // it out into an area a little wider than the content size it was given — setting
+        // the frame to that size instead left the blurred backdrop 12 pt narrower than the
+        // card, as a lighter unblurred band down the right-hand edge. The hosting view
+        // autoresizes inside the backdrop, so one assignment moves everything.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        popover.contentSize = size
+        CATransaction.commit()
     }
 
     private func installClickAwayMonitors() {
@@ -335,5 +450,7 @@ final class StatusItemController: NSObject {
 extension StatusItemController: NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         removeClickAwayMonitors()
+        mixer.setPopoverOpen(false)
+        system.setPopoverOpen(false)
     }
 }

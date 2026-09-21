@@ -1,125 +1,94 @@
+import AppKit
 import SwiftUI
 
-/// Single source of truth for the popover size so the SwiftUI frame and
-/// `NSPopover.contentSize` can never disagree (a mismatch clips the card).
+/// Single source of truth for the popover's size. The card's height depends on what is
+/// playing, on how many apps the mixer is showing, and on whether the output list is open,
+/// so the SwiftUI root does not pin it: `StatusItemController` sets `NSPopover.contentSize`
+/// and the hosting view's frame together from these numbers, and the root fills what it is
+/// given. That keeps one authority for a height that changes, instead of three that have
+/// to be kept in agreement.
 enum ExpandedIslandMetrics {
-    static let width: CGFloat = 300
-    static let height: CGFloat = 150
+    /// Control Centre's own width, near enough. The card is a mixing desk now: a fader per
+    /// source needs room for a name and a usable throw, which 300 did not have.
+    static let width: CGFloat = 340
     static let padding: CGFloat = 14
-    static let artwork: CGFloat = 72
-    static var size: NSSize { NSSize(width: width, height: height) }
+    static let sectionGap: CGFloat = 10
+
+    /// Nothing playing, nothing making noise: just the system's output. The card is never
+    /// empty, which is the whole point of the redesign.
+    static var idleSize: NSSize {
+        NSSize(width: width, height: padding * 2 + SoundMetrics.base)
+    }
+
+    /// Everything except the output list. This is the part `StatusItemController` holds
+    /// monotonic while the popover is open, so a row can never vanish from under a fader
+    /// mid-drag.
+    static func baseHeight(for plan: SourcePlan) -> CGFloat {
+        var sections: [CGFloat] = []
+        if plan.hasHero {
+            sections.append(NowPlayingMetrics.height(hasFader: !DebugLog.mixerDisabled))
+        }
+        if !plan.others.isEmpty {
+            sections.append(SourceListMetrics.height(rows: plan.others.count))
+        }
+        sections.append(SoundMetrics.base)
+        let gaps = sectionGap * CGFloat(max(sections.count - 1, 0))
+        return padding * 2 + sections.reduce(0, +) + gaps
+    }
+
+    /// The output list, which the user opened and may close again.
+    static func pickerHeight(for plan: SourcePlan) -> CGFloat {
+        SoundMetrics.picker(devices: plan.outputDeviceCount, expanded: plan.isPickingOutput)
+    }
+
+    static func size(for plan: SourcePlan) -> NSSize {
+        NSSize(width: width, height: baseHeight(for: plan) + pickerHeight(for: plan))
+    }
 }
 
+/// The expanded card: every audio source on the Mac, and the output they all land in.
+///
+/// One list, not two. The source with a Now Playing session is drawn as a tile with its
+/// artwork and transport; every other app holding an output connection is the same control
+/// at row size. Nothing appears twice, and the panel degrades cleanly — no session means no
+/// tile, no apps means no list, and the Sound panel is always there.
 struct ExpandedIslandView: View {
     @Environment(NowPlayingStore.self) private var store
+    @Environment(AudioMixer.self) private var mixer
+    @Environment(SystemAudioController.self) private var system
 
     var body: some View {
-        ZStack {
-            HUDBackground()
-            HStack(alignment: .center, spacing: 14) {
-                artwork
-                VStack(alignment: .leading, spacing: 5) {
-                    MarqueeText(text: displayTitle, font: .headline.bold())
-                        .frame(height: 18)
-                    Text(store.session?.artist ?? " ")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(height: 16, alignment: .leading)
-                    Text(store.session?.appName ?? "")
-                        .font(.caption2)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(.white.opacity(0.12), in: Capsule())
-                        .frame(height: 18, alignment: .leading)
-                    ExpandedBars()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    HStack(spacing: 22) {
-                        transportButton("backward.end.fill") { store.previousTrack() }
-                        transportButton(store.isPlaying ? "pause.fill" : "play.fill") { store.togglePlayPause() }
-                        transportButton("forward.end.fill") { store.nextTrack() }
-                    }
-                    .font(.title3)
-                    .frame(height: 22)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .clipped()
+        let plan = SourcePlan.make(session: store.session, mixer: mixer, system: system)
+        // Top-aligned: the card's height is monotonic while it is open, so when a source
+        // disappears the card stays tall for a moment. A centred stack would slide
+        // everything down into the gap.
+        //
+        // The blurred backdrop is deliberately *not* here. It is an `NSVisualEffectView`
+        // installed as the popover's own container (see `StatusItemController`), because a
+        // representable inside this tree is resized by a SwiftUI layout pass that lands
+        // after the popover's frame has already grown: the blur stayed at the old height
+        // and the strip below it showed the window's raw backing, which read as the Sound
+        // panel being cut off below its slider.
+        VStack(spacing: ExpandedIslandMetrics.sectionGap) {
+            if plan.hasHero {
+                NowPlayingPanel(row: plan.heroRow)
             }
-            .padding(ExpandedIslandMetrics.padding)
-            .foregroundStyle(.white)
+            if !plan.others.isEmpty {
+                SourceListPanel(rows: plan.others)
+            }
+            SoundPanel()
         }
-        .frame(width: ExpandedIslandMetrics.width, height: ExpandedIslandMetrics.height)
+        // Ideal heights, never negotiated. The card's height is resized from outside
+        // SwiftUI, so for a frame after a section grows the stack is still being offered
+        // the old height; without this the panels compress to fit.
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(ExpandedIslandMetrics.padding)
+        .frame(width: ExpandedIslandMetrics.width)
+        .frame(maxHeight: .infinity, alignment: .top)
         .clipped()
         .environment(\.colorScheme, .dark)
+        .foregroundStyle(.white)
     }
-
-    private struct ExpandedBars: View {
-        @Environment(NowPlayingStore.self) private var store
-        @Environment(Preferences.self) private var preferences
-
-        var body: some View {
-            let barCount = preferences.visualizerBarCount
-            IslandBarsView(
-                flat: !store.isPlaying,
-                animating: store.isPlaying && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
-                palette: store.palette,
-                metrics: BarMetrics(barWidth: 4, gap: 2.5, minHeight: 3, maxHeight: 24, count: barCount),
-                glow: true
-            )
-            .id(barCount)
-        }
-    }
-
-    private var displayTitle: String {
-        guard let session = store.session else { return "Not Playing" }
-        if !session.title.isEmpty { return session.title }
-        if !session.artist.isEmpty { return session.artist }
-        return store.isPlaying ? "Playing in \(session.appName)" : session.appName
-    }
-
-    private func transportButton(_ symbol: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .frame(width: 24, height: 22)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var artwork: some View {
-        let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
-        return Group {
-            if let image = store.session?.artwork {
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFill()
-            } else {
-                Color(white: 0.2)
-            }
-        }
-        .frame(width: ExpandedIslandMetrics.artwork, height: ExpandedIslandMetrics.artwork)
-        .clipShape(shape)
-        .overlay(shape.strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.45), radius: 8, y: 3)
-    }
-}
-
-struct HUDBackground: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = .hudWindow
-        view.blendingMode = .behindWindow
-        view.state = .active
-        view.appearance = NSAppearance(named: .vibrantDark)
-        view.wantsLayer = true
-        view.layer?.cornerRadius = 14
-        view.layer?.masksToBounds = true
-        return view
-    }
-
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
 
 private struct WidthKey: PreferenceKey {
@@ -156,20 +125,23 @@ struct MarqueeText: View {
                     )
                     .offset(x: x)
                     .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
+                    .clipped()
+                    // The mask follows the scroll rather than sitting still: a title that
+                    // has moved left is cut mid-word at the leading edge, and a hard cut
+                    // there reads as a clipping bug rather than as a marquee.
+                    .mask(edgeFade(trailing: overflow, leading: x < -1))
             }
-            .clipped()
-            .mask(edgeFade(overflow: overflow))
             .onPreferenceChange(WidthKey.self) { textWidth = $0 }
         }
     }
 
-    /// Soft fade on the trailing edge while the text is scrolling.
-    private func edgeFade(overflow: Bool) -> some View {
+    private func edgeFade(trailing: Bool, leading: Bool) -> some View {
         LinearGradient(
             stops: [
-                .init(color: .black, location: 0),
-                .init(color: .black, location: overflow ? 0.9 : 1),
-                .init(color: overflow ? .clear : .black, location: 1),
+                .init(color: leading ? .clear : .black, location: 0),
+                .init(color: .black, location: leading ? 0.06 : 0),
+                .init(color: .black, location: trailing ? 0.92 : 1),
+                .init(color: trailing ? .clear : .black, location: 1),
             ],
             startPoint: .leading,
             endPoint: .trailing

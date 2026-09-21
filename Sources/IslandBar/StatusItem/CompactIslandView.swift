@@ -54,12 +54,21 @@ struct CompactIslandView: View {
     /// menu bar is `light`, a dark one `dark`. Deliberately not forced to dark — the
     /// capsule below is what makes a dark menu bar work, and on a light one it would
     /// sit there as a hard black pill.
-    @Environment(\.colorScheme) private var colorScheme
+    ///
+    /// Read through `MenuBarAppearance` rather than from `@Environment(\.colorScheme)`
+    /// here. The glass menu bar takes its lightness from what is drawn under it, so a body
+    /// that both reads that decision and repaints the pill is a feedback loop, and the
+    /// pill's presence animation set it ringing hundreds of times a second. The reading
+    /// itself lives in `AppearanceProbe`, which draws nothing.
+    @Environment(MenuBarAppearance.self) private var menuBar
+    /// Animating in a menu bar that hides itself is what stops it hiding — see
+    /// `MenuBarAutoHide`.
+    @Environment(MenuBarAutoHide.self) private var autoHide
     var buttonHeight: CGFloat
 
     /// On a light menu bar the pill's black capsule is dropped and the bars darken so
     /// they stay readable against white.
-    private var onLightMenuBar: Bool { DebugLog.forcedPillIsLight ?? (colorScheme == .light) }
+    private var onLightMenuBar: Bool { DebugLog.forcedPillIsLight ?? menuBar.isLight }
 
     private var barCount: Int { preferences.visualizerBarCount }
     private var bars: BarMetrics { CompactIslandMetrics.bars(count: barCount) }
@@ -80,6 +89,7 @@ struct CompactIslandView: View {
         // the mark sits at a fixed trailing inset — so collapsing the slot moves nothing.
         GeometryReader { geo in
             ZStack(alignment: .trailing) {
+                AppearanceProbe()
                 if preferences.showPillBackground && !onLightMenuBar {
                     Capsule()
                         .fill(Color.black.opacity(0.92))
@@ -91,7 +101,7 @@ struct CompactIslandView: View {
                 }
                 IslandBarsView(
                     flat: false,
-                    animating: store.isPlaying && !reduceMotion,
+                    animating: store.isPlaying && !reduceMotion && autoHide.animationAllowed,
                     palette: store.palette,
                     metrics: bars,
                     lightBackground: onLightMenuBar

@@ -12,10 +12,13 @@ enum CoreAudioProps {
     static let systemObject = AudioObjectID(kAudioObjectSystemObject)
     static let unknown = AudioObjectID(kAudioObjectUnknown)
 
-    static func address(_ selector: AudioObjectPropertySelector) -> AudioObjectPropertyAddress {
+    static func address(
+        _ selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal
+    ) -> AudioObjectPropertyAddress {
         AudioObjectPropertyAddress(
             mSelector: selector,
-            mScope: kAudioObjectPropertyScopeGlobal,
+            mScope: scope,
             mElement: kAudioObjectPropertyElementMain
         )
     }
@@ -23,10 +26,11 @@ enum CoreAudioProps {
     static func get<T>(
         object: AudioObjectID,
         selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
         qualifier: UnsafeRawPointer? = nil,
         qualifierSize: UInt32 = 0
     ) -> T? {
-        var addr = address(selector)
+        var addr = address(selector, scope: scope)
         var size = UInt32(MemoryLayout<T>.size)
         let buffer = UnsafeMutablePointer<T>.allocate(capacity: 1)
         defer { buffer.deallocate() }
@@ -35,8 +39,12 @@ enum CoreAudioProps {
         return buffer.pointee
     }
 
-    static func getArray<T>(object: AudioObjectID, selector: AudioObjectPropertySelector) -> [T] {
-        var addr = address(selector)
+    static func getArray<T>(
+        object: AudioObjectID,
+        selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal
+    ) -> [T] {
+        var addr = address(selector, scope: scope)
         var size: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(object, &addr, 0, nil, &size) == noErr, size > 0 else {
             return []
@@ -134,6 +142,22 @@ final class AudioProcessRegistry: @unchecked Sendable {
     /// Whether any process of the session's app is currently producing output.
     func isOutputActive(for session: NowPlayingSession) -> Bool {
         snapshot().contains { $0.isRunningOutput && Self.matches(session: session, process: $0) }
+    }
+
+    /// The output devices `process` is currently connected to. A non-empty answer means the
+    /// process holds a live output connection, which is a steadier signal than
+    /// `kAudioProcessPropertyIsRunningOutput` — that one drops to false in the gap between
+    /// tracks — and it excludes the twenty-odd system daemons that never open an output.
+    ///
+    /// The scope matters: `kAudioProcessPropertyDevices` answers only in the **output** scope.
+    /// Asked globally it returns an empty array for every process, including ones that are
+    /// audibly playing, which reads as "nothing is using audio" rather than as an error.
+    func outputDevices(for process: AudioObjectID) -> [AudioObjectID] {
+        CoreAudioProps.getArray(
+            object: process,
+            selector: kAudioProcessPropertyDevices,
+            scope: kAudioObjectPropertyScopeOutput
+        )
     }
 
     func objectID(forPID pid: pid_t) -> AudioObjectID? {
