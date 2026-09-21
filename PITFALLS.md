@@ -591,39 +591,39 @@ Nothing is lost when it happens — the source is in git, and a rebuild restores
 merge upstream/main` instead, which is the only path that keeps the code and the binary the
 same thing.
 
-### Cutting a release in CI, on a public repository
+### Cutting a release in CI
 
-`.github/workflows/release.yml` cuts a release for every push to `main`. It runs on the
-self-hosted runner `macbookpro-1-islandbar` — the work Mac, registered against this
-repository with the `islandbar-release` label — and signs with the key in the
-`ISLANDBAR_SIGNING_KEY` repository secret.
+`.github/workflows/release.yml` cuts a release for every push to `main`, on a GitHub-hosted
+`macos-26` runner, signing with the key in the `ISLANDBAR_SIGNING_KEY` repository secret.
 
-**A self-hosted runner on a public repository is a standing invitation.** Anyone can fork
-this repository and open a pull request, and the moment a workflow with a `pull_request`
-trigger targets this runner, that outside code runs on the work Mac — a machine holding work
-AWS profiles and ssh keys — with the release signing key in its environment. The workflow
-therefore triggers only on `push` to `main` and `workflow_dispatch`, both of which need write
-access. **Never add a `pull_request` trigger to a workflow that targets a self-hosted
-runner.** If a PR check is ever wanted, give it `runs-on: macos-26` so it lands on a
-throwaway GitHub VM; GitHub-hosted macOS runners are free for public repositories, so that
-costs nothing.
+**Do not "save money" by moving this to a self-hosted runner.** GitHub Actions is free for
+public repositories — macOS runners included, and the 2026 pricing change's new per-minute
+platform charge applies to self-hosted runners only in *private* repositories. There is
+nothing to save, and the first version of this workflow proved the rest: it ran on the work
+Mac for two days (2026-09-21) and was worse in every way that mattered. It released only while
+that machine was logged in; a FileVault reboot parked it at the unlock prompt and releases
+stopped silently rather than deferring; and it put an agent that executes this repository's
+workflows onto the machine holding the work AWS profiles and ssh keys. It cost about 80
+seconds of build time to give all of that up (12.9 s on an M5 versus 79.8 s on the GitHub
+runner — the slower one is free, waits for nobody's login, and is thrown away afterwards).
+
+If a self-hosted runner is ever wanted anyway, one rule is absolute: **never give it a
+`pull_request` trigger.** Anyone can fork a public repository and open a pull request, so that
+would run a stranger's code, with the signing key in its environment, on a machine that is not
+a throwaway VM. A PR check wants `runs-on: macos-26` as well — that is free too.
 
 **A release cut by hand would be followed by a second one from CI**, because `release.sh`
 pushes to `main` and that push is precisely the event the workflow watches. The release
-commit now carries `[skip ci]` for this reason. A release cut *by* CI needs no such marker:
-a push made with the workflow's own `GITHUB_TOKEN` starts no workflow run at all.
+commit therefore carries `[skip ci]`. A release cut *by* CI needs no such marker: a push made
+with the workflow's own `GITHUB_TOKEN` starts no workflow run at all.
 
 **The checkout must not be shallow.** `fetch-depth: 0` is load-bearing twice over — the build
 number is `git rev-list --count HEAD`, and both the notes range and the key-rotation guard
 read tags. At the default depth of 1 the build number silently comes out as `2`, and the
 rotation guard decides there is no previous key at all.
 
-**The runner is a laptop, not a service.** It is a LaunchAgent, so it runs only while that
-user is logged in; a FileVault reboot parks the work Mac at the unlock prompt and nothing is
-released until someone unlocks it. `launchd` will not start it from the login window. While
-the machine is down, pushes to `main` simply queue no run — the release is skipped, not
-deferred, so re-cut it by hand when the runner is back.
-
 **The key now sits in three places** — `~/.config/islandbar/update-signing.key` on each Mac,
-and GitHub's secret store. See "A release key must ship before it signs anything" above for
-why losing all three is unrecoverable.
+and GitHub's secret store. A GitHub-hosted runner has no copy on disk to fall back on, so the
+secret is load-bearing: unset it and the job fails at the signing step rather than quietly
+publishing something unsigned. See "A release key must ship before it signs anything" above
+for why losing every copy is unrecoverable.
