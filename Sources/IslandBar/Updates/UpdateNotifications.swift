@@ -101,6 +101,17 @@ final class UpdateNotifications: NSObject, UNUserNotificationCenterDelegate {
         try? await center.add(request)
     }
 
+    func notifyRolledBack(failed: String, restored: String) async {
+        guard await ensureAuthorized(), let center else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "IslandBar \(failed) could not start"
+        content.body = "IslandBar went back to \(restored), and will not offer \(failed) again."
+        content.categoryIdentifier = Self.installedCategory
+        content.userInfo = [Self.versionKey: restored]
+        let request = UNNotificationRequest(identifier: "update-rolled-back-\(failed)", content: content, trigger: nil)
+        try? await center.add(request)
+    }
+
     func removeAvailableNotification(for version: AppVersion) {
         center?.removeDeliveredNotifications(withIdentifiers: ["update-available-\(version)"])
     }

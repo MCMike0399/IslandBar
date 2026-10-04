@@ -148,6 +148,8 @@ IslandBar updates itself from [GitHub Releases](https://github.com/MCMike0399/Is
 
 Forking? Repoint `UpdateFeed.repository` at your own repository before you build, or this one's releases will install themselves over your build (see PITFALLS.md).
 
+An update has to prove it can start. The new version is launched and given a minute to report that it is up; if it does not — it crashes at launch, or hangs — the previous version is put back and reopened, the failed version is never offered again, and a notification says so (a later release is still offered). What the relaunch did is logged to `~/Library/Application Support/IslandBar/update-helper.log`.
+
 Because signing is ad-hoc, macOS asks for System Audio Recording again after each update. In-place updates need the app to live in a writable folder and not be running from App Translocation (an unmoved download); in those cases the window offers the release page instead.
 
 ### Cutting a release

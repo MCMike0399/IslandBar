@@ -599,6 +599,35 @@ A found match reads as not found, and `&& pass || fail` inverts. The same thing 
 **Check it:** grep a file, not a pipe — `Scripts/harness` snapshots the log since its mark to a
 file and greps that.
 
+### Inside a shell function, `$1` is the function's
+
+The first draft of the probation helper wrapped `open` in a `launch()` function that used `$2`
+for the app path. In a shell function the positional parameters are the *function's*
+arguments, so it ran `open ""` — which exits 0 and opens nothing — and the helper rolled back a
+perfectly healthy update because the new version had never been launched. The log line was
+`open  -> 0`, with the empty path in plain sight.
+
+**Check it:** name a script's arguments once at the top (`app="$2"`) and use only the names
+below that. And log the command with its arguments, not just its status: an exit code alone
+said "fine".
+
+### `defaults read` takes a path only if it is absolute
+
+`defaults read some/relative/Info CFBundleShortVersionString` reads the *preferences domain*
+named `some/relative/Info` and answers that the key "does not exist" — which read as the app
+bundle having vanished mid-update. Pass `"$PWD/…/Contents/Info"`.
+
+### `plutil` keypaths split on `.`, and the preferences keys contain dots
+
+`plutil -extract updates.skippedVersion …` looks for `skippedVersion` *inside* a dictionary
+named `updates`, finds nothing, and the extraction is empty. The update scenario's first
+save/restore of the user's update preferences used it, so it saved nothing, cleared the keys
+for the test, and "restored" nothing — silently wiping the state it promised to put back.
+`defaults read-type` / `defaults read` / `defaults write -<type>` take the key verbatim.
+
+**Check it** by round-tripping real values, not an empty domain: a restore tested against keys
+that were not there proves nothing (rule 2 in AGENTS.md).
+
 ### An untrusted signing identity is only found through the search list
 
 codesign refuses a self-signed identity by name (`no identity found`; `find-identity` lists it
@@ -645,10 +674,34 @@ fine says nothing about the release.
 
 The vendored adapter now resolves its bundle from `Bundle.main.resourceURL` and never touches
 `Bundle.module`. **Check it:** `Scripts/launch-smoke.sh` launches a packaged app with `.build`
-moved aside and requires it to stay up; release.sh runs it on the runner before publishing,
-and `gh workflow run release.yml -f dry_run=true` runs the whole release there without
-publishing. `strings libMediaRemoteAdapter.dylib | grep /Users/` on a release shows whether a
-build path is baked in.
+moved aside and requires it to stay up; release.sh runs it on the runner, against the archive
+extracted exactly as users receive it, before anything is published, and
+`gh workflow run release.yml -f dry_run=true` runs the whole release there without publishing.
+`strings libMediaRemoteAdapter.dylib | grep /Users/` on a release shows whether a build path is
+baked in. The check was proven against the broken v0.5.0 archive, which it fails with the same
+`could not load resource bundle` message users saw.
+
+### An update must prove it starts before the old copy is deleted
+
+The relaunch helper used to open the new version, sleep eight seconds and delete the parked
+previous one — without asking whether the new one had come up. With v0.5.0 that left every
+copy that took the update with nothing that could start, and nothing that could update it.
+
+Now the new version is on probation (`UpdateProbation.swift`). Every launch writes its version
+to `~/Library/Application Support/IslandBar/launched-ok` after five seconds up; the helper waits
+up to 60 s for that exact version. If it never appears, the helper kills whatever is left of the
+new version, puts the parked copy back, reopens it and writes `rolled-back`; the restored
+version reads that, marks the failed version skipped (a later release is still offered) and
+tells the user. The helper narrates every step to `update-helper.log` in the same folder — the
+only record of a failed relaunch on someone else's Mac.
+
+Only copies that already contain this code are protected: it runs in the *old* version, so 0.5.1
+and earlier delete their backup as before. **Check it:** `Scripts/harness check update` installs
+a signed release whose executable exits at once (must be rolled back and skipped) and a signed
+healthy one (must be kept), against a throwaway copy, key and `file://` feed.
+
+**Recognize a rollback:** `updates: rolled back from X to Y; skipping X` in the debug log, and
+`X did not report a healthy launch within 60s` in `update-helper.log`.
 
 ### A release key must ship before it signs anything
 

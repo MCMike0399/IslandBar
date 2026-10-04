@@ -128,6 +128,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DebugLog.line("IslandBar launched pid=\(ProcessInfo.processInfo.processIdentifier)")
         installTerminationSignalHandler()
         watchdog.arm()
+        // An update is on probation until this lands (UpdateProbation).
+        UpdateProbation.scheduleHealthyMarker()
     }
 
     /// `pkill`/`kill` send SIGTERM, which would otherwise skip `applicationWillTerminate`

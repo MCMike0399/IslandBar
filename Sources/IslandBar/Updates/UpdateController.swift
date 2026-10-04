@@ -92,6 +92,7 @@ final class UpdateController {
     func start() {
         notifications.activate()
         announceIfJustUpdated()
+        recoverFromRollbackIfAny()
 
         timer = Timer.scheduledTimer(withTimeInterval: Self.checkInterval, repeats: true) { _ in
             Task { @MainActor in self.automaticCheck(reason: "interval") }
@@ -312,20 +313,53 @@ final class UpdateController {
 
     // MARK: - Relaunch
 
-    /// A detached shell waits for this process to exit, opens the new bundle and then
-    /// clears the parked previous version and the staging folder.
+    /// A detached shell waits for this process to exit, opens the new bundle, and keeps the
+    /// parked previous version until the new one proves it can start (`UpdateProbation`).
+    /// If it never reports in, the previous version goes back in place and is reopened.
     private func relaunch(with result: InstalledUpdate, release: UpdateRelease) {
         UserDefaults.standard.set(release.version.description, forKey: Keys.announceVersion)
+        // $1 pid · $2 app · $3 parked previous app · $4 staging · $5 debug · $6 health marker
+        // $7 rollback record · $8 new version · $9 previous version · $10 deadline (s)
+        // $11 log. The helper outlives the app, so its log is the only record of a failed
+        // relaunch on someone else's Mac.
         let script = """
         trap '' HUP
-        while kill -0 "$1" 2>/dev/null; do sleep 0.2; done
-        if [ "$5" = "1" ]; then
-            /usr/bin/open --env ISLANDBAR_DEBUG=1 "$2"
-        else
-            /usr/bin/open "$2"
-        fi
+        # Named once, here: inside a shell function $1…$9 are the function's own arguments,
+        # and an earlier draft opened "" from inside launch() without a word of complaint.
+        pid="$1" app="$2" previous="$3" staging="$4" debug="$5" marker="$6" record="$7"
+        new_version="$8" old_version="$9" deadline="${10}" log="${11}"
+        exec >>"$log" 2>&1
+        say() { echo "$(date '+%Y-%m-%dT%H:%M:%S') $*"; }
+        launch() {
+            if [ "$debug" = "1" ]; then /usr/bin/open --env ISLANDBAR_DEBUG=1 "$app"; else /usr/bin/open "$app"; fi
+            say "open $app -> $?"
+        }
+        say "update $old_version -> $new_version: waiting for pid $pid to exit"
+        while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
+        rm -f "$marker"
+        launch
+        waited=0
+        while [ "$waited" -lt "$deadline" ]; do
+            if [ "$(cat "$marker" 2>/dev/null)" = "$new_version" ]; then
+                say "$new_version reported a healthy launch after ${waited}s; removing $old_version"
+                rm -rf "$previous" "$staging"
+                exit 0
+            fi
+            sleep 1
+            waited=$((waited + 1))
+        done
+        # The new version never stayed up long enough to say so: put the previous one back.
+        say "$new_version did not report a healthy launch within ${deadline}s; rolling back to $old_version"
+        /usr/bin/pkill -f "$app/Contents/MacOS/IslandBar"
+        sleep 1
+        [ -d "$previous" ] || { say "no parked copy of $old_version at $previous; leaving $new_version"; exit 1; }
+        mv "$app" "$staging/rejected.app" || { say "could not move $new_version aside"; exit 1; }
+        if ! mv "$previous" "$app"; then say "could not restore $old_version"; mv "$staging/rejected.app" "$app"; exit 1; fi
+        printf '%s %s\n' "$new_version" "$old_version" > "$record"
+        launch
         sleep 8
-        rm -rf "$3" "$4"
+        rm -rf "$staging"
+        say "rolled back to $old_version"
         """
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
@@ -336,6 +370,12 @@ final class UpdateController {
             result.backupURL.path,
             result.stagingDirectory.path,
             DebugLog.enabled ? "1" : "0",
+            UpdateProbation.healthyMarker.path,
+            UpdateProbation.rollbackRecord.path,
+            release.version.description,
+            AppVersion.current.description,
+            String(UpdateProbation.deadline),
+            UpdateProbation.helperLog.path,
         ]
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
@@ -356,6 +396,24 @@ final class UpdateController {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(400))
             NSApp.terminate(nil)
+        }
+    }
+
+    /// The previous launch was an update that never came up, and the relaunch helper put this
+    /// version back. Do not offer that version again — a later release still will be — and
+    /// say what happened, because to the user it looks like the update simply did not stick.
+    private func recoverFromRollbackIfAny() {
+        guard let rollback = UpdateProbation.takeRollback() else { return }
+        guard rollback.restored == AppVersion.current else {
+            DebugLog.line("updates: ignoring a stale rollback record (\(rollback.failed) → \(rollback.restored))")
+            return
+        }
+        DebugLog.line("updates: rolled back from \(rollback.failed) to \(rollback.restored); skipping \(rollback.failed)")
+        skippedVersion = rollback.failed
+        UserDefaults.standard.set(rollback.failed.description, forKey: Keys.skippedVersion)
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            await notifications.notifyRolledBack(failed: rollback.failed.description, restored: rollback.restored.description)
         }
     }
 

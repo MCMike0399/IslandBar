@@ -30,7 +30,7 @@
 #
 # Checking it
 #   check [scenario...]   run scenarios and print PASS/FAIL; no argument runs them all:
-#                         smoke playback pause menubar card packaging
+#                         smoke playback pause menubar card packaging update
 #
 # Exit codes: 0 pass, 1 a check failed, 2 usage, 3 blocked on the user (the System Audio
 # Recording prompt, see `status`). Read AGENTS.md before relying on this.
@@ -359,13 +359,137 @@ check_packaging() {
   [[ -n "$was_running" ]] && launch_app >/dev/null
 }
 
+# The self-update path end to end, against a throwaway copy of the app, a throwaway
+# signing key and a file:// feed: a release that cannot start must be rolled back (and
+# skipped), and one that can must be kept. This is what stops a bad release from stranding
+# installed copies the way v0.5.0 did (UpdateProbation.swift).
+UPDATE_KEYS=(updates.skippedVersion updates.notifiedVersion updates.notifiedAt updates.snoozedVersion
+             updates.snoozeUntil updates.announceVersion)
+DOMAIN=dev.burbuja-lab.islandbar
+
+# The update keys are saved as "key<TAB>type<TAB>value" and written back with the matching
+# `defaults write -<type>`. Not plutil: its keypaths split on ".", so "updates.skippedVersion"
+# reads as a key inside "updates" and comes back empty — an earlier draft "restored" nothing
+# and left the user's update state wiped.
+save_update_prefs() {
+  : > "$WORK/update-prefs.tsv"
+  local k type
+  for k in "${UPDATE_KEYS[@]}"; do
+    type="$(defaults read-type "$DOMAIN" "$k" 2>/dev/null | sed -n 's/^Type is //p')" || true
+    [[ -n "$type" ]] && printf '%s\t%s\t%s\n' "$k" "$type" "$(defaults read "$DOMAIN" "$k")" >> "$WORK/update-prefs.tsv"
+  done
+  return 0
+}
+clear_update_prefs() { local k; for k in "${UPDATE_KEYS[@]}"; do defaults delete "$DOMAIN" "$k" 2>/dev/null || true; done; }
+restore_update_prefs() {
+  clear_update_prefs
+  local k type value
+  while IFS=$'\t' read -r k type value; do
+    case "$type" in
+      string)  defaults write "$DOMAIN" "$k" -string "$value" ;;
+      date)    defaults write "$DOMAIN" "$k" -date "$value" ;;
+      integer) defaults write "$DOMAIN" "$k" -int "$value" ;;
+      float)   defaults write "$DOMAIN" "$k" -float "$value" ;;
+      boolean) defaults write "$DOMAIN" "$k" -bool "$value" ;;
+      *) say "warning: cannot restore $k (type $type)" ;;
+    esac
+  done < "$WORK/update-prefs.tsv"
+}
+
+# make_release <version> broken|good — a signed zip + feed entry under $UPD/feed.
+make_release() {
+  local version="$1" kind="$2" stage="$UPD/stage-$1"
+  rm -rf "$stage"; mkdir -p "$stage"
+  ditto "$APP" "$stage/IslandBar.app"
+  plutil -replace CFBundleShortVersionString -string "$version" "$stage/IslandBar.app/Contents/Info.plist"
+  if [[ "$kind" == broken ]]; then
+    # Signs and verifies like a real release, and exits the moment it is opened.
+    printf '#!/bin/sh\nexit 1\n' > "$stage/IslandBar.app/Contents/MacOS/IslandBar"
+    chmod +x "$stage/IslandBar.app/Contents/MacOS/IslandBar"
+  fi
+  codesign --force --deep --sign - "$stage/IslandBar.app" >/dev/null 2>&1
+  local zip="$UPD/feed/IslandBar-$version.zip"
+  rm -f "$zip"
+  (cd "$stage" && ditto -c -k --keepParent IslandBar.app "$zip")
+  swift "$ROOT/Tools/update-signing.swift" sign "$UPD/key" "$zip" > "$zip.sig"
+  cat > "$UPD/feed/latest.json" <<JSON
+{"tag_name": "v$version", "name": "IslandBar $version", "body": "harness test release",
+ "draft": false, "prerelease": false, "html_url": "https://example.invalid/",
+ "assets": [
+  {"name": "IslandBar-$version.zip", "browser_download_url": "file://$zip", "size": $(stat -f %z "$zip")},
+  {"name": "IslandBar-$version.zip.sig", "browser_download_url": "file://$zip.sig", "size": $(stat -f %z "$zip.sig")}
+ ]}
+JSON
+}
+
+launch_update_copy() {
+  pkill -x IslandBar || true
+  for _ in $(seq 1 25); do pgrep -x IslandBar >/dev/null || break; sleep 0.2; done
+  open --env ISLANDBAR_DEBUG=1 --env ISLANDBAR_UPDATE_FEED_URL="file://$UPD/feed/latest.json" \
+    --env ISLANDBAR_UPDATE_PUBLIC_KEY="$UPD_PUB" --env ISLANDBAR_UPDATE_AUTO_INSTALL=1 \
+    --env ISLANDBAR_UPDATE_CHECK_DELAY=2 --env ISLANDBAR_UPDATE_PROBATION=12 "$UPD/IslandBar.app"
+}
+
+copy_version() { defaults read "$UPD/IslandBar.app/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo "?"; }
+
+check_update() {
+  say "== update (a release that cannot start is rolled back; one that can is kept)"
+  [[ "$(defaults read "$DOMAIN" automaticUpdateChecks 2>/dev/null || echo 1)" != "0" ]] \
+    || { fail "automatic update checks are off in Settings; the scenario needs them"; return; }
+  local was_running=""; [[ -n "$(island_pid)" ]] && was_running=1
+  player_running && post testplayer quit 2>/dev/null || true
+  UPD="$WORK/update-test"
+  rm -rf "$UPD"; mkdir -p "$UPD/feed"
+  ditto "$APP" "$UPD/IslandBar.app"
+  local current; current="$(copy_version)"
+  swift "$ROOT/Tools/update-signing.swift" keygen "$UPD/key" >/dev/null
+  UPD_PUB="$(swift "$ROOT/Tools/update-signing.swift" pubkey "$UPD/key")"
+  save_update_prefs
+  clear_update_prefs
+
+  # 1. A release that exits at launch.
+  make_release 99.0.0 broken
+  mark
+  launch_update_copy
+  wait_for 'updates: installed 99.0.0, relaunching' 40 >/dev/null \
+    && pass "a signed update to 99.0.0 installs" || fail "the broken update was never installed"
+  wait_for "updates: rolled back from 99.0.0 to $current" 40 >/dev/null \
+    && pass "the update that could not start was rolled back to $current" \
+    || fail "no rollback after the new version failed to start"
+  [[ "$(copy_version)" == "$current" ]] && pass "the previous app is back in place" \
+    || fail "the app on disk is $(copy_version), not $current"
+  [[ "$(defaults read "$DOMAIN" updates.skippedVersion 2>/dev/null)" == "99.0.0" ]] \
+    && pass "the failed version is skipped from now on" || fail "the failed version is not marked skipped"
+
+  # 2. A release that starts.
+  clear_update_prefs
+  make_release 99.0.1 good
+  mark
+  launch_update_copy
+  wait_for 'updates: installed 99.0.1, relaunching' 40 >/dev/null \
+    && pass "a signed update to 99.0.1 installs" || fail "the good update was never installed"
+  wait_for 'updates: launch healthy \(99.0.1\)' 30 >/dev/null \
+    && pass "the new version reports a healthy launch" || fail "99.0.1 never reported a healthy launch"
+  sleep 3
+  [[ "$(copy_version)" == "99.0.1" ]] && pass "the new version stays in place" \
+    || fail "the app on disk is $(copy_version) after a healthy update"
+  seen 'rolled back' >/dev/null && fail "a healthy update was rolled back" || pass "no rollback for a healthy update"
+
+  pkill -x IslandBar || true
+  for _ in $(seq 1 25); do pgrep -x IslandBar >/dev/null || break; sleep 0.2; done
+  restore_update_prefs
+  rm -f "$HOME/Library/Application Support/IslandBar/rolled-back"
+  [[ -n "$was_running" ]] && launch_app >/dev/null
+  return 0
+}
+
 run_checks() {
   local scenarios=("$@")
-  [[ ${#scenarios[@]} -gt 0 ]] || scenarios=(smoke playback pause menubar card packaging)
+  [[ ${#scenarios[@]} -gt 0 ]] || scenarios=(smoke playback pause menubar card packaging update)
   build_tools
   for s in "${scenarios[@]}"; do
     case "$s" in
-      smoke|playback|pause|menubar|card|packaging) "check_$s" ;;
+      smoke|playback|pause|menubar|card|packaging|update) "check_$s" ;;
       *) die "unknown scenario: $s" ;;
     esac
   done
