@@ -1,0 +1,500 @@
+#!/bin/bash
+# IslandBar test harness: build, launch, drive and check the real app from a shell.
+#
+#   Scripts/harness <command> [args]
+#
+# Lifecycle
+#   build                 ./build.sh, then launch the new build with debug logging
+#   launch                (re)launch dist/IslandBar.app with ISLANDBAR_DEBUG=1
+#   quit                  quit IslandBar and the test player
+#   restore               quit, and relaunch the copy that was running before `launch`
+#   status                what is running, which build, whether capture can work
+#   permission            trigger the System Audio Recording prompt with a silent player
+#                         and wait (up to 15 min) for someone to click Allow. Needed once
+#                         per Mac when builds use the development identity
+#                         (Scripts/dev-signing.sh), else once per build
+#
+# Driving it
+#   player start [title]  launch the test player (a quiet generated tone + Now Playing)
+#   player play|pause|fullscreen|windowed|quit
+#   menubar hidden|revealed|auto
+#                         pin the menu bar reading (hidden = full screen, pointer away;
+#                         revealed = pointer at the top) or go back to reading the screen
+#   card                  open/close the sound card
+#   state                 dump the app's internal state (app / menubar / tap lines)
+#
+# Looking at it
+#   log [n]               last n debug-log lines (bandLevels noise filtered), default 40
+#   shot menubar|card [file.png]
+#                         screenshot the menu bar strip, or the open card
+#
+# Checking it
+#   check [scenario...]   run scenarios and print PASS/FAIL; no argument runs them all:
+#                         smoke playback pause menubar card
+#
+# Exit codes: 0 pass, 1 a check failed, 2 usage, 3 blocked on the user (the System Audio
+# Recording prompt, see `status`). Read AGENTS.md before relying on this.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APP="$ROOT/dist/IslandBar.app"
+WORK="$ROOT/.build/harness"
+LOG="$HOME/Library/Logs/IslandBar/debug.log"
+TOOL="$WORK/harness-tool"
+PLAYER_APP="$WORK/IslandBarTestPlayer.app"
+PLAYER_LOG="$WORK/player.log"
+PLAYER_ID="dev.burbuja-lab.islandbar.testplayer"
+NOTE_PREFIX="dev.burbuja-lab.islandbar"
+mkdir -p "$WORK" "$(dirname "$LOG")"
+touch "$LOG"
+
+FAILURES=0
+
+say()  { printf '%s\n' "$*"; }
+fail() { printf 'FAIL  %s\n' "$*"; FAILURES=$((FAILURES + 1)); }
+pass() { printf 'PASS  %s\n' "$*"; }
+die()  { printf 'error: %s\n' "$*" >&2; exit 2; }
+
+# --- helpers -----------------------------------------------------------------------------
+
+# Compile the Swift helpers when their source is newer than the binary.
+build_tools() {
+  local src="$ROOT/Tools/Harness"
+  if [[ ! -x "$TOOL" || "$src/HarnessTool.swift" -nt "$TOOL" ]]; then
+    swiftc -O "$src/HarnessTool.swift" -o "$TOOL" 2>"$WORK/tool-build.log" \
+      || { cat "$WORK/tool-build.log" >&2; die "could not build harness-tool"; }
+  fi
+  local bin="$PLAYER_APP/Contents/MacOS/IslandBarTestPlayer"
+  if [[ ! -x "$bin" || "$src/TestPlayer.swift" -nt "$bin" ]]; then
+    rm -rf "$PLAYER_APP"
+    mkdir -p "$PLAYER_APP/Contents/MacOS"
+    swiftc -O "$src/TestPlayer.swift" -o "$bin" 2>"$WORK/player-build.log" \
+      || { cat "$WORK/player-build.log" >&2; die "could not build the test player"; }
+    cat > "$PLAYER_APP/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>$PLAYER_ID</string>
+  <key>CFBundleName</key><string>IslandBar Test Player</string>
+  <key>CFBundleExecutable</key><string>IslandBarTestPlayer</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
+</dict></plist>
+PLIST
+    codesign --force --sign - "$PLAYER_APP" >/dev/null 2>&1
+  fi
+}
+
+post() { build_tools; "$TOOL" post "$NOTE_PREFIX.$1" "${2:-}"; }
+
+island_pid() { pgrep -x IslandBar | head -n 1 || true; }
+
+# Byte offset into the debug log; `wait_for` only looks at lines written after it.
+MARK=0
+mark() { MARK=$(stat -f %z "$LOG"); }
+# The log since the mark, as a file. Checks grep the file rather than a pipe: under
+# pipefail, `tail | grep -q` fails whenever grep stops early and tail takes a SIGPIPE.
+SINCE="$WORK/since-mark.log"
+snapshot() { tail -c +"$((MARK + 1))" "$LOG" > "$SINCE"; }
+# seen <extended regex> — print the first matching line since the mark.
+seen() { snapshot; grep -E -m 1 -- "$1" "$SINCE"; }
+
+# wait_for <extended regex> [timeout seconds] — succeeds when a matching line has been
+# written since the last `mark`, and prints it.
+wait_for() {
+  local pattern="$1" timeout="${2:-10}" waited=0 hit
+  while (( waited < timeout * 5 )); do
+    if hit="$(seen "$pattern")"; then
+      printf '%s\n' "$hit"
+      return 0
+    fi
+    sleep 0.2
+    waited=$((waited + 1))
+  done
+  return 1
+}
+
+# Ask the app for its state and print the three `state` lines it writes back.
+dump_state() {
+  [[ -n "$(island_pid)" ]] || { say "IslandBar is not running"; return 1; }
+  mark
+  post debugDumpState
+  if ! wait_for '\] state tap ' 5 >/dev/null; then
+    # The tap line comes off the tap queue; the other two come off the main thread.
+    if seen '\] state app ' >/dev/null; then
+      grep -E '\] state (app|menubar) ' "$SINCE" | sed 's/^\[[^]]*\] //'
+      say "state tap: no reply — the tap queue is stuck (Scripts/harness status)"
+    else
+      say "no state reply (is it running with ISLANDBAR_DEBUG=1? use Scripts/harness launch)"
+    fi
+    return 1
+  fi
+  snapshot
+  grep -E '\] state (app|menubar|tap) ' "$SINCE" | sed 's/^\[[^]]*\] //'
+}
+
+# state_field <name> — one field (`name=value`) from a fresh state dump. It moves the
+# mark (the dump is found by marking first), so `mark` again before any `wait_for`.
+state_field() { dump_state | tr ' ' '\n' | sed -n "s/^$1=//p" | sed -n 1p; }
+
+# A tap that never appears is almost always the System Audio Recording prompt: every
+# rebuild changes the ad-hoc signature, and until someone answers the prompt the tap
+# queue sits inside AudioDeviceCreateIOProcIDWithBlock.
+tap_blocked_on_prompt() {
+  local pid; pid="$(island_pid)"
+  [[ -n "$pid" ]] || return 1
+  sample "$pid" 1 -file "$WORK/sample.txt" >/dev/null 2>&1 || return 1
+  grep -q 'CreateIOProcID' "$WORK/sample.txt" && grep -q 'islandbar.tap' "$WORK/sample.txt"
+}
+
+blocked_exit() {
+  # Do not leave a tone playing on someone's Mac while they go find the prompt.
+  player_running && post testplayer quit 2>/dev/null || true
+  say "BLOCKED  IslandBar is waiting on the System Audio Recording prompt."
+  say "         Ask the user to click Allow (System Settings › Privacy & Security ›"
+  say "         Screen & System Audio Recording if no prompt is visible), then re-run."
+  say "         It returns after every rebuild: the signature is ad-hoc, so run all"
+  say "         checks against one build. Scripts/grant-audio-permission.sh avoids it"
+  say "         when this terminal has Full Disk Access."
+  exit 3
+}
+
+launch_app() {
+  [[ -d "$APP" ]] || die "no $APP — run: Scripts/harness build"
+  build_tools
+  local pid; pid="$(island_pid)"
+  if [[ -n "$pid" ]]; then
+    local running; running="$(ps -o comm= -p "$pid" | sed 's#/Contents/MacOS/IslandBar$##')"
+    # Remember a copy that is not ours, so `restore` can put it back.
+    [[ "$running" == "$APP" ]] || printf '%s\n' "$running" > "$WORK/previous-app"
+    pkill -x IslandBar || true
+    for _ in $(seq 1 25); do pgrep -x IslandBar >/dev/null || break; sleep 0.2; done
+    pkill -9 -x IslandBar || true
+  fi
+  mark
+  # Through LaunchServices, never the binary directly: a shell parent becomes the
+  # "responsible process" for TCC and the tap is denied (PITFALLS.md).
+  open --env ISLANDBAR_DEBUG=1 "$APP"
+  local line
+  line="$(wait_for 'IslandBar launched pid=' 15)" || die "IslandBar did not log a launch within 15 s"
+  say "launched: ${line##*pid=}  ($(defaults read "$APP/Contents/Info" CFBundleShortVersionString) $(codesign -dvvv "$APP" 2>&1 | sed -n 's/^CDHash=//p'))"
+}
+
+player_running() { pgrep -x IslandBarTestPlayer >/dev/null; }
+
+# player_start [title] [level]
+player_start() {
+  build_tools
+  local title="${1:-Harness tone $(date +%H%M%S)}" level="${2:-0.05}"
+  if player_running; then
+    post testplayer quit 2>/dev/null || true
+    for _ in $(seq 1 15); do player_running || break; sleep 0.2; done
+    pkill -x IslandBarTestPlayer || true
+  fi
+  : > "$PLAYER_LOG"
+  open -n --stdout "$PLAYER_LOG" --stderr "$PLAYER_LOG" "$PLAYER_APP" --args --title "$title" --level "$level"
+  for _ in $(seq 1 50); do grep -q '] playing' "$PLAYER_LOG" && break; sleep 0.2; done
+  grep -q '] playing' "$PLAYER_LOG" || { cat "$PLAYER_LOG"; die "the test player did not start playing"; }
+  PLAYER_TITLE="$title"
+  say "player: playing \"$title\""
+}
+
+player_cmd() {
+  player_running || die "the test player is not running (Scripts/harness player start)"
+  post testplayer "$1"
+}
+
+# --- scenarios ---------------------------------------------------------------------------
+
+check_smoke() {
+  say "== smoke"
+  [[ -n "$(island_pid)" ]] || launch_app
+  if dump_state >/dev/null; then pass "app is running and answers state dumps"
+  else fail "no state dump (not launched with ISLANDBAR_DEBUG=1? use Scripts/harness launch)"; return; fi
+  grep -q "IslandBar launched pid=$(island_pid)\$" "$LOG" \
+    && pass "the running process logged its own launch" || fail "no launch line for pid $(island_pid) in the debug log"
+}
+
+# Leaves the player running and a tap capturing; later scenarios build on it.
+check_playback() {
+  say "== playback"
+  [[ -n "$(island_pid)" ]] || launch_app
+  post debugMenuBar auto
+  mark
+  player_start "Harness playback $(date +%H%M%S)"
+  wait_for "session bundle=$PLAYER_ID .*title=$PLAYER_TITLE" 10 >/dev/null \
+    && pass "Now Playing session reached the app" || { fail "no session from the test player"; return; }
+  wait_for 'isPlaying=true applied|pill presence=playing' 10 >/dev/null \
+    && pass "playing state applied" || fail "playing state never applied"
+  if ! wait_for 'tap created|procedural driver active' 12 >/dev/null; then
+    tap_blocked_on_prompt && blocked_exit
+    fail "neither a tap nor the procedural fallback started"; return
+  fi
+  if seen 'procedural driver active' >/dev/null; then
+    fail "fell back to procedural motion: $(seen 'procedural driver active' | sed 's/^\[[^]]*\] //')"
+    return
+  fi
+  pass "process tap created"
+  local alive
+  if alive="$(wait_for 'tap IO alive' 5)"; then
+    local read="${alive##*samplesRead=}"
+    if [[ "$read" -gt 0 ]]; then pass "tap is delivering audio (samplesRead=$read)"
+    else fail "tap runs but delivers no samples — the TCC grant does not match this build (PITFALLS.md)"; fi
+  elif seen 'IO callback missing' >/dev/null; then
+    fail "the tap gets no audio — System Audio Recording is not granted for this signature (Scripts/harness permission)"
+  else
+    fail "no 'tap IO alive' line"
+  fi
+  # Live audio gives a different rms every second; a frozen tap repeats one value.
+  sleep 4
+  local distinct
+  snapshot
+  distinct="$( (grep 'fromTap=true' "$SINCE" || true) | grep -o 'rms=[-0-9.]*' | tail -n 4 | sort -u | wc -l | tr -d ' ')"
+  [[ "$distinct" -ge 3 ]] && pass "bars are moving ($distinct distinct levels in 4 s)" \
+    || fail "bars look frozen ($distinct distinct levels from the tap in 4 s)"
+}
+
+ensure_capturing() {
+  if [[ "$(state_field engine)" != "true" ]]; then
+    check_playback
+    [[ "$(state_field engine)" == "true" ]] || { fail "could not get a running capture to test against"; return 1; }
+  fi
+}
+
+check_pause() {
+  say "== pause"
+  ensure_capturing || return
+  mark
+  player_cmd pause
+  # The app holds "playing" while the player's output stays open (a few seconds).
+  wait_for 'capture engine stopped reason=pause' 15 >/dev/null \
+    && pass "pause stops the capture engine" || fail "capture engine not stopped after pause"
+  mark
+  player_cmd play
+  wait_for 'capture engine restarted|tap created' 12 >/dev/null \
+    && pass "resume brings capture back" || fail "capture did not come back after resume"
+}
+
+check_menubar() {
+  say "== menubar (capture pauses while the menu bar is hidden)"
+  ensure_capturing || return
+  [[ "$(state_field pausePref)" == "true" ]] || { fail "the pause-while-hidden setting is off"; return; }
+
+  mark
+  post debugMenuBar hidden
+  wait_for 'capture engine stopped reason=menu-bar-hidden' 5 >/dev/null \
+    && pass "hiding the menu bar stops capture at once" || fail "capture kept running with the menu bar hidden"
+  wait_for 'tap torn down reason=menu-bar-hidden' 9 >/dev/null \
+    && pass "the tap (recording session, purple dot) is torn down after the grace" \
+    || fail "the tap was not torn down within 9 s"
+  [[ "$(state_field tapExists)" == "false" ]] && pass "state: no tap while hidden" || fail "state still reports a tap"
+
+  mark
+  post debugMenuBar revealed
+  wait_for 'tap created .*reason=menu-bar-shown' 8 >/dev/null \
+    && pass "revealing the menu bar builds a fresh tap" || fail "no new tap when the menu bar was revealed"
+  [[ "$(state_field engine)" == "true" ]] && pass "state: capturing again" || fail "state: engine not running after reveal"
+
+  # A glance away and back inside the grace must reuse the same recording session.
+  sleep 1
+  mark
+  post debugMenuBar hidden
+  wait_for 'capture engine stopped reason=menu-bar-hidden' 5 >/dev/null || fail "second hide did not stop capture"
+  sleep 1
+  post debugMenuBar revealed
+  wait_for 'capture engine restarted reason=menu-bar-shown' 5 >/dev/null \
+    && pass "a quick hide/reveal restarts the same engine" || fail "quick hide/reveal did not restart the engine"
+  seen 'tap created' >/dev/null && fail "a quick hide/reveal opened a new recording session" \
+    || pass "no new recording session for a quick glance"
+
+  # A second full hide/reveal inside the backoff must not open another session at once:
+  # the reveal shows procedural motion until the backoff (20 s after the second tap) ends.
+  mark
+  post debugMenuBar hidden
+  wait_for 'tap torn down reason=menu-bar-hidden' 9 >/dev/null || fail "second teardown did not happen"
+  mark
+  post debugMenuBar revealed
+  wait_for 'tap rebuild deferred' 4 >/dev/null \
+    && pass "a repeat reveal inside the backoff defers the new session" \
+    || fail "a repeat reveal opened a session immediately (no pacing)"
+  wait_for 'tap created .*reason=poll' 25 >/dev/null \
+    && pass "the deferred tap arrives once the backoff ends" || fail "no tap after the backoff ended"
+
+  post debugMenuBar auto
+}
+
+check_card() {
+  say "== card (capture stays on while the card is open over a hidden menu bar)"
+  ensure_capturing || return
+  mark
+  post debugMenuBar hidden
+  wait_for 'capture engine stopped reason=menu-bar-hidden' 5 >/dev/null || { fail "hide did not stop capture"; post debugMenuBar auto; return; }
+  mark
+  post debugTogglePopover
+  wait_for 'capture engine restarted reason=menu-bar-shown|tap created .*reason=menu-bar-shown' 6 >/dev/null \
+    && pass "opening the card resumes capture" || fail "capture stayed off with the card open"
+  [[ "$(state_field card)" == "true" ]] && pass "state: card is open" || fail "state: card not reported open"
+  mark
+  post debugTogglePopover
+  wait_for 'capture engine stopped reason=menu-bar-hidden' 6 >/dev/null \
+    && pass "closing the card stops capture again" || fail "capture kept running after the card closed"
+  post debugMenuBar auto
+}
+
+run_checks() {
+  local scenarios=("$@")
+  [[ ${#scenarios[@]} -gt 0 ]] || scenarios=(smoke playback pause menubar card)
+  build_tools
+  for s in "${scenarios[@]}"; do
+    case "$s" in
+      smoke|playback|pause|menubar|card) "check_$s" ;;
+      *) die "unknown scenario: $s" ;;
+    esac
+  done
+  post debugMenuBar auto 2>/dev/null || true
+  player_running && post testplayer quit 2>/dev/null || true
+  echo
+  if [[ $FAILURES -eq 0 ]]; then say "ALL PASSED (${scenarios[*]})"; exit 0
+  else say "$FAILURES FAILED — see Scripts/harness log 80"; exit 1; fi
+}
+
+# --- commands ----------------------------------------------------------------------------
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  build)
+    say "building…"
+    "$ROOT/build.sh" > "$WORK/build.log" 2>&1 || { tail -n 30 "$WORK/build.log"; die "build failed (full log: $WORK/build.log)"; }
+    launch_app
+    if "$ROOT/Scripts/dev-signing.sh" available; then
+      say "signed with the development identity: an existing System Audio Recording grant still applies"
+    else
+      say "signed ad-hoc: expect a System Audio Recording prompt (Scripts/dev-signing.sh setup ends that)"
+    fi
+    ;;
+  permission)
+    # The prompt gives up by itself after about 90 s when nobody answers (a locked Mac),
+    # and the tap it was guarding then comes up deaf: created, but with no IO. So success
+    # is samples actually arriving, and an unanswered prompt is raised again with a fresh
+    # player until the deadline.
+    [[ -n "$(island_pid)" ]] || launch_app
+    post debugMenuBar auto
+    say "Raising the System Audio Recording prompt (silent player), for up to 15 min."
+    say "Someone has to click Allow on the Mac itself — over Screen Sharing if it is locked or"
+    say "its lid is closed. With no time pressure instead: System Settings › Privacy & Security ›"
+    say "Screen & System Audio Recording › System Audio Recording Only › + › $APP"
+    deadline=$(( $(date +%s) + 900 ))
+    attempt=0
+    while (( $(date +%s) < deadline )); do
+      attempt=$((attempt + 1))
+      mark
+      player_start "Harness permission check $attempt" 0 >/dev/null
+      if line="$(wait_for 'tap IO alive|IO callback missing|procedural driver active' 120)"; then
+        case "$line" in
+          *"tap IO alive"*)
+            if [[ "${line##*samplesRead=}" -gt 0 ]]; then
+              post testplayer quit || true
+              say "granted: the tap delivers audio for this signature"
+              exit 0
+            fi
+            say "attempt $attempt: tap runs but delivers nothing (not granted); asking again" ;;
+          *) say "attempt $attempt: no grant (${line#*] }); asking again" ;;
+        esac
+      else
+        say "attempt $attempt: no answer yet"
+      fi
+      post testplayer quit || true
+      sleep 3
+    done
+    say "timed out: System Audio Recording was not granted"
+    exit 3
+    ;;
+  launch) launch_app ;;
+  quit)
+    player_running && post testplayer quit || true
+    pkill -x IslandBar && say "IslandBar quit" || say "IslandBar was not running"
+    ;;
+  restore)
+    player_running && post testplayer quit || true
+    pkill -x IslandBar || true
+    if [[ -s "$WORK/previous-app" ]]; then
+      prev="$(cat "$WORK/previous-app")"
+      sleep 1
+      open "$prev" && say "relaunched $prev"
+      rm -f "$WORK/previous-app"
+    else
+      say "nothing to restore (no other copy was running when the harness launched)"
+    fi
+    ;;
+  status)
+    pid="$(island_pid)"
+    if [[ -n "$pid" ]]; then
+      say "IslandBar: running pid $pid  ($(ps -o comm= -p "$pid"))"
+      ps -E -o command= -p "$pid" 2>/dev/null | grep -q 'ISLANDBAR_DEBUG=1' \
+        && say "debug: on" || say "debug: unknown (hooks need a launch via Scripts/harness)"
+    else
+      say "IslandBar: not running"
+    fi
+    if [[ -d "$APP" ]]; then
+      say "build: $(defaults read "$APP/Contents/Info" CFBundleShortVersionString) cdhash $(codesign -dvvv "$APP" 2>&1 | sed -n 's/^CDHash=//p')"
+      say "requirement: $(codesign -d -r- "$APP" 2>&1 | sed -n 's/^#* *designated => //p')"
+    fi
+    tcc="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+    if grant="$(sqlite3 "$tcc" "select auth_value, hex(csreq) from access where service='kTCCServiceAudioCapture' and client='dev.burbuja-lab.islandbar';" 2>/dev/null)"; then
+      # The stored requirement ends in either the build's cdhash (ad-hoc) or the
+      # development certificate's hash.
+      cd_hash="$(codesign -dvvv "$APP" 2>&1 | sed -n 's/^CDHash=//p' | tr a-f A-F)"
+      leaf="$(codesign -d -r- "$APP" 2>&1 | sed -n 's/.*certificate leaf = H"\([0-9a-f]*\)".*/\1/p' | tr a-f A-F)"
+      if [[ -z "$grant" ]]; then say "audio grant: none — expect a prompt"
+      elif [[ "$grant" == 2\|* && ( "$grant" == *"$cd_hash"* || ( -n "$leaf" && "$grant" == *"$leaf"* ) ) ]]; then
+        say "audio grant: allowed for this build"
+      else say "audio grant: stale or denied — expect a prompt (or Scripts/grant-audio-permission.sh)"; fi
+    else
+      say "audio grant: unknown (this terminal cannot read TCC.db without Full Disk Access)"
+    fi
+    if [[ -n "$pid" ]] && tap_blocked_on_prompt; then
+      say "capture: BLOCKED on the System Audio Recording prompt — the user must click Allow"
+    fi
+    player_running && say "test player: running" || say "test player: not running"
+    ;;
+  player)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      start) player_start "${1:-}" ;;
+      play|pause|fullscreen|windowed|quit) player_cmd "$sub"; sleep 0.5; tail -n 2 "$PLAYER_LOG" ;;
+      *) die "usage: Scripts/harness player start [title] | play | pause | fullscreen | windowed | quit" ;;
+    esac
+    ;;
+  menubar)
+    case "${1:-}" in
+      hidden|revealed|auto) post debugMenuBar "$1"; say "menu bar: $1" ;;
+      *) die "usage: Scripts/harness menubar hidden|revealed|auto" ;;
+    esac
+    ;;
+  card) post debugTogglePopover; say "card toggled" ;;
+  state) dump_state ;;
+  log)
+    tail -n 4000 "$LOG" | grep -v 'bandLevels=' | tail -n "${1:-40}"
+    ;;
+  shot)
+    what="${1:-}"; out="${2:-$WORK/shot-${1:-x}-$(date +%H%M%S).png}"
+    build_tools
+    case "$what" in
+      menubar)
+        screencapture -x -R"0,0,$(osascript -l JavaScript -e 'ObjC.import("AppKit"); $.NSScreen.mainScreen.frame.size.width'),40" "$out"
+        ;;
+      card)
+        # The card is the tallest IslandBar window; capture the screen region, not the
+        # window, or the vibrant backdrop comes back flat grey (PITFALLS.md).
+        read -r _ x y w h _ < <("$TOOL" windows IslandBar | sort -k5 -n | tail -n 1) || true
+        [[ -n "${h:-}" && "$h" -gt 60 ]] || die "the card is not open (Scripts/harness card)"
+        screencapture -x -R"$x,$y,$w,$h" "$out"
+        ;;
+      *) die "usage: Scripts/harness shot menubar|card [file.png]" ;;
+    esac
+    say "$out"
+    ;;
+  check) run_checks "$@" ;;
+  ""|-h|--help|help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command: $cmd (Scripts/harness help)" ;;
+esac

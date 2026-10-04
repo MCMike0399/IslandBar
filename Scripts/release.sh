@@ -118,13 +118,15 @@ if [[ $DRY_RUN -eq 0 ]]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" Resources/Info.plist
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" Resources/Info.plist
   plutil -lint Resources/Info.plist >/dev/null
-  if ! ./build.sh; then
+  # Always ad-hoc, even on a Mac with the development identity: users' copies must not
+  # depend on a certificate that lives in one developer's keychain.
+  if ! ISLANDBAR_ADHOC=1 ./build.sh; then
     git checkout -- Resources/Info.plist
     echo "error: build failed; Info.plist restored, nothing committed" >&2
     exit 1
   fi
 else
-  ISLANDBAR_VERSION="$VERSION" ISLANDBAR_BUILD="$BUILD_NUMBER" ./build.sh
+  ISLANDBAR_ADHOC=1 ISLANDBAR_VERSION="$VERSION" ISLANDBAR_BUILD="$BUILD_NUMBER" ./build.sh
 fi
 
 # The installer runs the same check on the other end; fail here rather than there.

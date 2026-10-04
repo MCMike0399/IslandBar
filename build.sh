@@ -38,7 +38,14 @@ if ! otool -l "$CONTENTS/MacOS/IslandBar" | grep -q '@executable_path/../Framewo
   install_name_tool -add_rpath @executable_path/../Frameworks "$CONTENTS/MacOS/IslandBar"
 fi
 
-codesign --force --deep --sign - --options runtime --entitlements "$ROOT/Resources/IslandBar.entitlements" "$APP"
+# A local build signs with the stable development identity when this Mac has one, so the
+# System Audio Recording grant survives rebuilds (Scripts/dev-signing.sh). Everything else
+# — releases (ISLANDBAR_ADHOC=1), CI, a Mac without the identity — is signed ad-hoc.
+if [[ "${ISLANDBAR_ADHOC:-}" != "1" ]] && "$ROOT/Scripts/dev-signing.sh" available; then
+  "$ROOT/Scripts/dev-signing.sh" sign "$APP"
+else
+  codesign --force --deep --sign - --options runtime --entitlements "$ROOT/Resources/IslandBar.entitlements" "$APP"
+fi
 codesign -dv --verbose=2 "$APP"
 plutil -lint "$ROOT/Resources/Info.plist"
 otool -L "$CONTENTS/MacOS/IslandBar"
