@@ -6,6 +6,7 @@ final class ProceduralDriver: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "dev.burbuja-lab.islandbar.procedural")
     private var t: Double = 0
+    var isRunning: Bool { timer != nil }
     private var envelope: [Float]
     private let phases: [(f1: Double, f2: Double, p: Double)]
 

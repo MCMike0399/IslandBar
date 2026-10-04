@@ -166,6 +166,24 @@ FADE0C00 | 00000028 (length) | 00000001 (one requirement) | 00000008 (cdhash opc
 `csreq -r- file` wants a **file path**, not a requirement string, and `csreq -r- -b` fails
 on an empty argument — build the blob directly as above instead of fighting the tool.
 
+### A pending prompt parks the tap queue, and looks like a hang
+
+The System Audio Recording prompt does not fail a tap that is waiting for it: the call blocks.
+`TapController`'s queue sits inside `AudioDeviceCreateIOProcIDWithBlock` until someone answers
+or the prompt gives up, which it does after about **90 seconds** (measured twice on a locked
+Mac: 22:10:30 → 22:12:00 and 22:27:25 → 22:28:55). Everything queued behind it waits too — a
+session that ended in the meantime is torn down the instant the call returns, which is why the
+log can show `tap created` and `tap torn down` in the same millisecond. An unanswered prompt
+is not a grant: the tap is created and then never calls its IO proc (`IO callback missing
+within 2s; falling back to procedural`), so `tap created` alone proves nothing.
+
+**Recognize it:** `isPlaying=true applied` with no `tap created` and no `procedural driver
+active` after it, and a `state` dump whose `state tap` line never arrives.
+**Check it:** `sample IslandBar 1` shows the `islandbar.tap` queue in `CreateIOProcID`;
+`Scripts/harness status` reports it as BLOCKED. Only the click fixes it. A stable signing
+identity (`Scripts/dev-signing.sh`) means the click is needed once per Mac instead of once per
+build.
+
 ### Microphone and audio-capture are different services
 
 `coreaudiod` preflights `kTCCServiceMicrophone` for the requesting pid as well. That one is
@@ -531,6 +549,72 @@ less the menu bar. Both heights are needed — the short one *is* the held-open 
 The inset comes from `screen.frame.maxY - screen.visibleFrame.maxY`, never from
 `NSStatusBar.system.thickness`: on a notched Mac the bar is 33 pt and that property still
 answers 24, and the nine points made every full-screen window miss its match.
+
+### Capture follows what can be seen, not what is playing
+
+Where the menu bar hides, the pill is out of sight, and a process tap kept running for it is a
+purple recording indicator over someone's full-screen film for nothing. So capture is
+suspended whenever `MenuBarAutoHide.isVisible` is false — the bar is hidden, the pointer has not
+revealed it, and the card is not open — and resumes when any of those changes.
+
+The suspension reuses the pause machinery: the engine halts at once and the tap is destroyed
+after `suspendTeardownGrace` (5 s) rather than the pause's 30, because the indicator is the whole
+point. A reveal inside the grace restarts the same engine, so glancing at the menu bar does not
+open a recording session per glance. A reveal *after* the grace is a new session, and someone
+who checks the menu bar every half minute through a film would open one per visit — the rate at
+which macOS starts warning that an app asks to record too often. So a menu-bar teardown keeps
+the playing session's rebuild backoff (20, 45, 90, 180, 300 s), and a reveal inside it shows
+procedural motion until the backoff runs out (`tap rebuild deferred` in the log). A pause resets
+it, as it always did. If a pause's 30 s teardown is pending when the bar hides, the sooner 5 s
+one replaces it. Every path that could build a tap — polls, wake, output
+and process-list changes — goes through `renewTap`, which refuses while suspended; that one
+guard is what keeps the hidden state clean.
+
+The card counts as visible because it stays open after the pointer has moved down into it,
+out of the menu bar region, and its bars are live.
+
+**Check it:** `Scripts/harness check menubar card`.
+
+### A background process cannot enter full screen
+
+`NSWindow.toggleFullScreen` from an app the user did not bring forward is a silent no-op:
+macOS will not activate a process that started in the background while the user works in
+another app (`NSApp.activate()` is a request, not an order), and only the active app may enter
+full screen. A bare binary started from a shell fares no better. So the harness tests the hidden
+menu bar through a debug hook that pins `MenuBarAutoHide`'s reading, and real full-screen
+*detection* needs someone to click the test player's window first.
+
+**Recognize it:** the player logs `fullscreen=false wanted=true active=false`, and
+`CGWindowListCopyWindowInfo` shows its window at its windowed size.
+
+## Test harness
+
+### `set -o pipefail` turns an early match into a failure
+
+`producer | grep -q pattern` — and `| head -n 1` — exit as soon as they have their answer,
+the producer takes a SIGPIPE, and under `pipefail` the pipeline's status is the producer's 141.
+A found match reads as not found, and `&& pass || fail` inverts. The same thing stopped
+`Scripts/dev-signing.sh setup` dead, silently, at `tr … < /dev/urandom | head -c 40`.
+
+**Check it:** grep a file, not a pipe — `Scripts/harness` snapshots the log since its mark to a
+file and greps that.
+
+### An untrusted signing identity is only found through the search list
+
+codesign refuses a self-signed identity by name (`no identity found`; `find-identity` lists it
+as `CSSMERR_TP_NOT_TRUSTED`), and `--keychain` does not help: it narrows the search, it does not
+add to it. Named by its SHA-1 *and* with its keychain on the user search list, it signs, and the
+designated requirement comes out as `identifier … and certificate leaf = H"…"` — stable across
+builds, which is the point. `Scripts/dev-signing.sh sign` adds the keychain for the one codesign
+call and restores the list; it must not stay there, because after a reboot it comes back locked
+and other apps start asking for its password.
+
+Two more traps on the way. A Homebrew OpenSSL 3 writes a PKCS#12 that `security import` rejects
+with "MAC verification failed" — use `/usr/bin/openssl` (LibreSSL). And restore the search list
+from a **quoted bash array**: in zsh an unquoted `$list` is not word-split, and
+`security list-keychains -s $list` replaced the user's list with one bogus path made of all of
+them joined by a space (fixed within seconds, but every keychain lookup on the Mac depends on
+that list).
 
 ## Self-update
 

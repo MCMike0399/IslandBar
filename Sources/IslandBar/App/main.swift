@@ -8,6 +8,16 @@ enum IslandBarID {
     /// `NSApp.currentEvent`, so a synthetic accessibility press reaches it and does
     /// nothing. Honoured only under `ISLANDBAR_DEBUG=1`.
     static let debugTogglePopoverNotification = Notification.Name("dev.burbuja-lab.islandbar.debugTogglePopover")
+    /// Pins what `MenuBarAutoHide` reads, so a hidden or revealed menu bar can be tested
+    /// without a full-screen window (which a background process cannot enter: macOS will
+    /// not hand it the focus) or a hand on the pointer. The notification's `object` is
+    /// `hidden`, `revealed` or `auto`. Honoured only under `ISLANDBAR_DEBUG=1`; driven by
+    /// `Scripts/harness menubar`.
+    static let debugMenuBarNotification = Notification.Name("dev.burbuja-lab.islandbar.debugMenuBar")
+    /// Writes one `state …` line per subsystem to the debug log, so a script can assert on
+    /// what the app *is* doing rather than on the last thing it happened to log. Honoured
+    /// only under `ISLANDBAR_DEBUG=1`; driven by `Scripts/harness state`.
+    static let debugDumpStateNotification = Notification.Name("dev.burbuja-lab.islandbar.debugDumpState")
 }
 
 let running = NSRunningApplication.runningApplications(withBundleIdentifier: IslandBarID.bundleID)

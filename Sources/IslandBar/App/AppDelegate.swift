@@ -14,6 +14,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: StatusItemController!
     private var settings: SettingsWindowController!
     private var updater: UpdateController!
+    /// Shared with the status item, which gates the pill's animation on it; read here to
+    /// stop capturing while the menu bar is hidden.
+    private var menuBarAutoHide: MenuBarAutoHide!
     private let watchdog = RelaunchWatchdog()
     private var termSignal: DispatchSourceSignal?
     private var lastAppliedPlay = false
@@ -59,13 +62,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DebugLog.line(message)
         }
 
+        menuBarAutoHide = MenuBarAutoHide()
         statusItem = StatusItemController(
             store: store,
             preferences: preferences,
             mixer: mixer,
             system: system,
             settings: settings,
-            updater: updater
+            updater: updater,
+            menuBarAutoHide: menuBarAutoHide
         )
         tapController.start()
         mixer.start()
@@ -92,6 +97,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ) { [weak self] _ in
                 Task { @MainActor in
                     self?.statusItem.debugTogglePopover()
+                }
+            }
+            DistributedNotificationCenter.default().addObserver(
+                forName: IslandBarID.debugMenuBarNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] note in
+                let state = note.object as? String ?? "auto"
+                Task { @MainActor in
+                    self?.menuBarAutoHide.debugForce(state)
+                }
+            }
+            DistributedNotificationCenter.default().addObserver(
+                forName: IslandBarID.debugDumpStateNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.debugDumpState()
                 }
             }
         }
@@ -134,6 +158,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tapController.stop()
     }
 
+    /// One line per subsystem; `Scripts/harness state` waits for the `state tap` line, which
+    /// is written last because it comes off the tap queue.
+    private func debugDumpState() {
+        let session = store.session
+        DebugLog.line(
+            "state app playing=\(store.isPlaying) session=\(session?.bundleID ?? "-") pid=\(session?.pid ?? 0) "
+                + "title=\(session?.title ?? "-") permissionDenied=\(store.audioPermissionDenied)"
+        )
+        DebugLog.line(
+            "state menubar hidesBar=\(menuBarAutoHide.isActive) revealed=\(menuBarAutoHide.animationAllowed) "
+                + "card=\(menuBarAutoHide.cardIsOpen) visible=\(menuBarAutoHide.isVisible) "
+                + "pausePref=\(preferences.pauseCaptureWhileMenuBarHidden)"
+        )
+        tapController.debugDumpState()
+    }
+
     private func observeStore() {
         tick()
     }
@@ -143,6 +183,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let session = store.session?.tapSession
             let playing = store.isPlaying
             let prefs = preferences.snapshot
+            // Nothing can see the bars while the menu bar is hidden (a full-screen video),
+            // so there is no reason to hold a recording session, and its indicator, open.
+            // Pointing at the top of the screen reveals the bar and brings capture back.
+            let suspended = preferences.pauseCaptureWhileMenuBarHidden && !menuBarAutoHide.isVisible
             if prefs.barCount != lastAppliedBarCount {
                 lastAppliedBarCount = prefs.barCount
                 store.barCount = prefs.barCount
@@ -159,9 +203,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if !playing {
                     store.barLevels = BarLevels.rest(count: prefs.barCount)
                 }
-                tapController.apply(session: session, isPlaying: playing, preferences: prefs)
+                tapController.apply(
+                    session: session, isPlaying: playing, captureSuspended: suspended, preferences: prefs
+                )
             } else {
-                tapController.apply(session: session, isPlaying: playing, preferences: prefs)
+                tapController.apply(
+                    session: session, isPlaying: playing, captureSuspended: suspended, preferences: prefs
+                )
             }
         } onChange: { [weak self] in
             DispatchQueue.main.async { self?.tick() }

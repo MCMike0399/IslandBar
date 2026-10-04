@@ -15,6 +15,10 @@ import SwiftUI
 /// there, which is the only time anyone can see them: move away and the animation stops, and
 /// the bar hides the way it always did. On an ordinary desktop the bar never hides, none of
 /// this applies, and the pill animates exactly as before.
+///
+/// The same reading decides whether IslandBar listens at all: the audio capture is what
+/// lights macOS's purple recording indicator, and while the bar is hidden nothing it feeds
+/// can be seen. See `isVisible`.
 @MainActor
 @Observable
 final class MenuBarAutoHide {
@@ -23,12 +27,22 @@ final class MenuBarAutoHide {
     private(set) var isActive = false
     /// True while the pill may animate.
     private(set) var animationAllowed = true
+    /// True while the card hangs below the pill. Set by `StatusItemController`. The card
+    /// stays up after the pointer has moved down into it, out of the menu bar, and its
+    /// bars are live.
+    var cardIsOpen = false
+    /// Whether anything IslandBar draws can be seen: the menu bar is showing — always, or
+    /// because the pointer has revealed it — or the card is open.
+    var isVisible: Bool { !isActive || animationAllowed || cardIsOpen }
 
     /// Slower than the eye and far slower than the thing it is gating. Pointing at the menu
     /// bar starts the bars within a fifth of a second, which reads as immediate.
     private static let pointerInterval: TimeInterval = 0.2
     private var pointerTimer: Timer?
     private var modeTimer: Timer?
+    /// Set by the test harness (see `IslandBarID.debugMenuBarNotification`): the reading
+    /// is pinned and neither the space nor the pointer is consulted until it is cleared.
+    private var forced: (active: Bool, revealed: Bool)?
 
     init() {
         let workspace = NSWorkspace.shared.notificationCenter
@@ -61,7 +75,30 @@ final class MenuBarAutoHide {
         }
     }
 
+    /// `hidden`, `revealed`, or anything else to go back to reading the screen.
+    func debugForce(_ state: String) {
+        switch state {
+        case "hidden": forced = (true, false)
+        case "revealed": forced = (true, true)
+        default: forced = nil
+        }
+        DebugLog.line("menu bar forced=\(forced == nil ? "auto" : state)")
+        pointerTimer?.invalidate()
+        pointerTimer = nil
+        if let forced {
+            isActive = forced.active
+            setAllowed(forced.revealed)
+        } else {
+            // Start from the plain desktop and let a fresh reading take it from there,
+            // pointer timer included.
+            isActive = false
+            setAllowed(true)
+            reevaluate()
+        }
+    }
+
     private func reevaluate() {
+        guard forced == nil else { return }
         let active = Self.hidesMenuBarAlways || Self.spaceIsFullScreen()
         guard active != isActive else { return }
         isActive = active
@@ -82,7 +119,7 @@ final class MenuBarAutoHide {
     }
 
     private func updateForPointer() {
-        guard isActive else { return }
+        guard isActive, forced == nil else { return }
         setAllowed(Self.pointerIsInMenuBar())
     }
 

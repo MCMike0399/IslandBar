@@ -17,7 +17,7 @@ final class StatusItemController: NSObject {
     /// Owned here so it outlives every rebuild of the hosted root view: a fresh instance
     /// per rebuild would take its first reading as committed and let the ringing back in.
     private let menuBarAppearance = MenuBarAppearance()
-    private let menuBarAutoHide = MenuBarAutoHide()
+    private let menuBarAutoHide: MenuBarAutoHide
     private let popover = NSPopover()
     private var hosting: PassthroughHostingView<AnyView>?
     private var hostedHeight: CGFloat = 0
@@ -46,8 +46,10 @@ final class StatusItemController: NSObject {
         mixer: AudioMixer,
         system: SystemAudioController,
         settings: SettingsWindowController,
-        updater: UpdateController
+        updater: UpdateController,
+        menuBarAutoHide: MenuBarAutoHide
     ) {
+        self.menuBarAutoHide = menuBarAutoHide
         self.store = store
         self.preferences = preferences
         self.mixer = mixer
@@ -245,6 +247,7 @@ final class StatusItemController: NSObject {
             popover.contentSize = ExpandedIslandMetrics.size(for: currentPlan())
             popover.contentViewController = makeExpandedController()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            menuBarAutoHide.cardIsOpen = popover.isShown
             installClickAwayMonitors()
         }
     }
@@ -450,6 +453,7 @@ final class StatusItemController: NSObject {
 extension StatusItemController: NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         removeClickAwayMonitors()
+        menuBarAutoHide.cardIsOpen = false
         mixer.setPopoverOpen(false)
         system.setPopoverOpen(false)
     }

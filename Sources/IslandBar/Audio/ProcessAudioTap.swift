@@ -266,6 +266,9 @@ final class TapController: @unchecked Sendable {
 
     private var session: NowPlayingSession?
     private var isPlaying = false
+    /// True while the menu bar is hidden (a full-screen space): playback goes on, but
+    /// nothing can see the bars, so there is nothing to capture for.
+    private var captureSuspended = false
     private var prefs = PreferencesSnapshot(
         showPillBackground: true,
         analysisSource: .automatic,
@@ -275,6 +278,11 @@ final class TapController: @unchecked Sendable {
     private var ioWatchWork: DispatchWorkItem?
     private var selectWork: DispatchWorkItem?
     private var pauseTeardownWork: DispatchWorkItem?
+    /// When the armed teardown fires; a sooner one replaces it (see `scheduleTeardown`).
+    private var teardownDeadline: CFAbsoluteTime = 0
+    /// The last tap was torn down because the menu bar hid, with its session's rebuild
+    /// backoff kept. Revealing the bar again is then a *rebuild* as far as pacing goes.
+    private var rebuildPacedByMenuBar = false
     private var lastTargetIDs: [AudioObjectID] = []
     private var permissionDenied = false
 
@@ -311,6 +319,11 @@ final class TapController: @unchecked Sendable {
     /// enough that pause/resume toggling does not reopen a session per space bar tap;
     /// short enough that the indicator cannot outlive the pause by much.
     private static let pauseTeardownGrace: CFAbsoluteTime = 30
+    /// The same, for a hidden menu bar. Shorter, because the indicator is the whole point
+    /// of suspending; long enough that glancing at the menu bar and away again, or a space
+    /// switch the detector misreads for a moment, restarts the same engine instead of
+    /// opening a new recording session.
+    private static let suspendTeardownGrace: CFAbsoluteTime = 5
 
     private var tapStartedAt: CFAbsoluteTime = 0
     private var rebuildsThisSession = 0
@@ -373,17 +386,45 @@ final class TapController: @unchecked Sendable {
         registry.stop()
     }
 
-    func apply(session: NowPlayingSession?, isPlaying: Bool, preferences: PreferencesSnapshot) {
-        queue.async { [weak self] in
-            self?.applyLocked(session: session, isPlaying: isPlaying, preferences: preferences)
+    /// Logs the controller's state from its own queue (see `AppDelegate.debugDumpState`).
+    func debugDumpState() {
+        queue.async { [self] in
+            DebugLog.line(
+                "state tap phase=\(phase) tapExists=\(tap.isRunning) engine=\(tap.isEngineStarted) "
+                    + "analyzer=\(analyzer.isRunning) pump=\(pump.isRunning) suspended=\(captureSuspended) "
+                    + "teardownPending=\(pauseTeardownWork != nil) permissionDenied=\(permissionDenied)"
+            )
         }
     }
 
-    private func applyLocked(session: NowPlayingSession?, isPlaying: Bool, preferences: PreferencesSnapshot) {
+    func apply(
+        session: NowPlayingSession?,
+        isPlaying: Bool,
+        captureSuspended: Bool,
+        preferences: PreferencesSnapshot
+    ) {
+        queue.async { [weak self] in
+            self?.applyLocked(
+                session: session,
+                isPlaying: isPlaying,
+                captureSuspended: captureSuspended,
+                preferences: preferences
+            )
+        }
+    }
+
+    private func applyLocked(
+        session: NowPlayingSession?,
+        isPlaying: Bool,
+        captureSuspended: Bool,
+        preferences: PreferencesSnapshot
+    ) {
         let sessionChanged = session != self.session
         let playChanged = isPlaying != self.isPlaying
+        let suspendChanged = captureSuspended != self.captureSuspended
         self.session = session
         self.isPlaying = isPlaying
+        self.captureSuspended = captureSuspended
         self.prefs = preferences
 
         if preferences.barCount != barCount {
@@ -413,15 +454,49 @@ final class TapController: @unchecked Sendable {
                 tap.stopEngine()
                 DebugLog.line("capture engine stopped reason=pause")
             }
-            schedulePauseTeardown()
+            scheduleTeardown(after: Self.pauseTeardownGrace, reason: "paused-grace")
+            if !tap.isRunning {
+                // Already torn down (the menu bar hid first): the pause ends the playing
+                // session's pacing here, as the pause teardown would have.
+                rebuildsThisSession = 0
+                nextRebuildAt = 0
+                rebuildPacedByMenuBar = false
+            }
             return
         }
 
-        if !pump.isRunning { pump.start() }
-        if playChanged || sessionChanged || !phase.isTapping {
-            targetLostSince = nil
-            renewTap(reason: playChanged ? "playing" : "session-change")
+        if captureSuspended {
+            suspendCapture()
+            return
         }
+        if !pump.isRunning { pump.start() }
+        if playChanged || sessionChanged || suspendChanged || !phase.isTapping {
+            targetLostSince = nil
+            renewTap(reason: playChanged ? "playing" : suspendChanged ? "menu-bar-shown" : "session-change")
+        }
+    }
+
+    /// The menu bar is hidden, so the bars cannot be seen: stop listening. The engine
+    /// halts now and the tap — the recording session macOS's purple indicator follows — is
+    /// destroyed once `suspendTeardownGrace` has passed, exactly as a pause does. The bar
+    /// coming back goes through `renewTap`, which restarts the engine if the tap is still
+    /// there and builds a fresh one if not.
+    private func suspendCapture() {
+        selectWork?.cancel()
+        selectWork = nil
+        ioWatchWork?.cancel()
+        targetLostSince = nil
+        analyzer.stop()
+        procedural.stop()
+        pump.rest()
+        // Resuming eases from here; without it the first frames would replay the levels
+        // published at the moment of hiding.
+        shared.publish(bars: BarLevels.rest(count: barCount).values, rmsDb: -120, fromTap: false)
+        if tap.isEngineStarted {
+            tap.stopEngine()
+            DebugLog.line("capture engine stopped reason=menu-bar-hidden")
+        }
+        scheduleTeardown(after: Self.suspendTeardownGrace, reason: "menu-bar-hidden")
     }
 
     /// Rebuilds the analyzer, procedural driver and pump around a new bar count. Their
@@ -444,7 +519,7 @@ final class TapController: @unchecked Sendable {
         // the new width immediately instead of holding levels from the old one.
         shared.publish(bars: BarLevels.rest(count: count).values, rmsDb: -120, fromTap: false)
 
-        if wasPlaying {
+        if wasPlaying && !captureSuspended {
             if tapWasActive {
                 attachAnalyzer()
             } else {
@@ -476,7 +551,9 @@ final class TapController: @unchecked Sendable {
     /// This is the single place a process tap is created.
     private func renewTap(reason: String) {
         selectWork?.cancel()
-        guard isPlaying, let session else { return }
+        // Every path to a tap comes through here — polls, wake, output and process-list
+        // changes — so this one guard is what keeps a hidden menu bar free of capture.
+        guard isPlaying, !captureSuspended, let session else { return }
         // Playback is back: a pending pause teardown must not fire under a live engine.
         pauseTeardownWork?.cancel()
         pauseTeardownWork = nil
@@ -544,6 +621,20 @@ final class TapController: @unchecked Sendable {
                 scheduleReselect(after: 3)
                 return
             }
+        }
+
+        // Each reveal of a hidden menu bar after its teardown grace is a fresh recording
+        // session, and a hand that checks the menu bar every half minute through a film would
+        // open one per visit — the rate at which macOS starts warning that the app asks to
+        // record too often. So those taps keep the playing session's backoff, and a reveal
+        // that comes too soon shows procedural motion until the backoff runs out.
+        if !phase.isTapping, rebuildPacedByMenuBar, now < nextRebuildAt {
+            if !procedural.isRunning { procedural.start() }
+            DebugLog.line(
+                "tap rebuild deferred \(Int((nextRebuildAt - now).rounded(.up)))s reason=\(reason); procedural meanwhile"
+            )
+            scheduleReselect(after: nextRebuildAt - now)
+            return
         }
 
         let targets: [AudioObjectID]
@@ -632,6 +723,7 @@ final class TapController: @unchecked Sendable {
         }
 
         let now = CFAbsoluteTimeGetCurrent()
+        rebuildPacedByMenuBar = false
         phase = source
         lastTargetIDs = targets
         tapStartedAt = now
@@ -713,45 +805,59 @@ final class TapController: @unchecked Sendable {
         phase = .none
         rebuildsThisSession = 0
         nextRebuildAt = 0
+        rebuildPacedByMenuBar = false
         tapStartedAt = 0
         lastSessionPID = nil
         targetLostSince = nil
         onUsingProcedural?(false)
     }
 
-    /// Arms the pause teardown. A pending work item is left alone: `applyLocked` runs
-    /// again on every store change, and re-arming would restart the grace each time.
-    private func schedulePauseTeardown() {
-        guard pauseTeardownWork == nil, tap.isRunning else { return }
+    /// Arms the teardown of a halted tap, for a pause or a hidden menu bar. A pending
+    /// teardown is left alone unless this one is due sooner: `applyLocked` runs again on
+    /// every store change, and re-arming would restart the grace each time — but a pause's
+    /// 30 s must not outlive a hidden menu bar's 5 when one follows the other.
+    private func scheduleTeardown(after grace: CFAbsoluteTime, reason: String) {
+        guard tap.isRunning else { return }
+        let deadline = CFAbsoluteTimeGetCurrent() + grace
+        if pauseTeardownWork != nil, teardownDeadline <= deadline { return }
+        pauseTeardownWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            self?.tearDownPausedTap()
+            self?.tearDownHaltedTap(reason: reason)
         }
         pauseTeardownWork = work
-        queue.asyncAfter(deadline: .now() + Self.pauseTeardownGrace, execute: work)
+        teardownDeadline = deadline
+        queue.asyncAfter(deadline: .now() + grace, execute: work)
     }
 
-    /// The pause outlasted the grace: destroy the tap, which ends the recording session
-    /// the system's purple recording indicator is tied to. A resume cancels this work
-    /// item before it runs, so the guards below are only a safety net.
-    private func tearDownPausedTap() {
+    /// The pause or suspension outlasted its grace: destroy the tap, which ends the
+    /// recording session the system's purple recording indicator is tied to. Resuming
+    /// cancels this work item before it runs, so the guards below are only a safety net.
+    private func tearDownHaltedTap(reason: String) {
         pauseTeardownWork = nil
-        guard !isPlaying, session != nil, tap.isRunning else { return }
+        guard !isPlaying || captureSuspended, session != nil, tap.isRunning else { return }
         analyzer.stop()
         tap.stop()
         lastTargetIDs = []
         phase = .none
-        rebuildsThisSession = 0
-        nextRebuildAt = 0
+        // A pause ends the playing session's pacing; a hidden menu bar does not, because
+        // the same playback continues and every reveal would otherwise start from zero.
+        if isPlaying && captureSuspended {
+            rebuildPacedByMenuBar = true
+        } else {
+            rebuildsThisSession = 0
+            nextRebuildAt = 0
+            rebuildPacedByMenuBar = false
+        }
         tapStartedAt = 0
         lastSessionPID = nil
         targetLostSince = nil
-        DebugLog.line("tap torn down reason=paused-grace")
-        onTapEvent?("tap torn down reason=paused-grace")
+        DebugLog.line("tap torn down reason=\(reason)")
+        onTapEvent?("tap torn down reason=\(reason)")
     }
 
     private func scheduleReselect(after seconds: Double) {
         selectWork?.cancel()
-        guard isPlaying, session != nil else { return }
+        guard isPlaying, !captureSuspended, session != nil else { return }
         let work = DispatchWorkItem { [weak self] in
             self?.renewTap(reason: "poll")
         }

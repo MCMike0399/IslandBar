@@ -21,6 +21,9 @@ struct SettingsView: View {
                     in: BarCount.min...BarCount.max
                 )
                 .help("How many bars the audio visualizer draws (8–12).")
+                Toggle("Pause audio capture while the menu bar is hidden", isOn: $preferences.pauseCaptureWhileMenuBarHidden)
+                    .help("In full screen, stop listening to the audio until you point at the top of "
+                        + "the screen to reveal the menu bar. Turns off the recording indicator.")
             }
             Section("Updates") {
                 Toggle("Check for updates automatically", isOn: $preferences.automaticUpdateChecks)
@@ -37,7 +40,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 380, height: 368)
+        .frame(width: 380, height: 400)
         .padding(.bottom, 8)
     }
 

@@ -45,6 +45,14 @@ final class Preferences {
             UserDefaults.standard.set(visualizerBarCount, forKey: Keys.visualizerBarCount)
         }
     }
+    /// Stop capturing audio while the menu bar is hidden (full screen, or the desktop's own
+    /// auto-hide). Nothing can see the bars then, and the capture is what lights macOS's
+    /// purple recording indicator.
+    var pauseCaptureWhileMenuBarHidden: Bool {
+        didSet {
+            UserDefaults.standard.set(pauseCaptureWhileMenuBarHidden, forKey: Keys.pauseCaptureWhileMenuBarHidden)
+        }
+    }
     var automaticUpdateChecks: Bool {
         didSet { UserDefaults.standard.set(automaticUpdateChecks, forKey: Keys.automaticUpdateChecks) }
     }
@@ -82,6 +90,7 @@ final class Preferences {
         analysisSource = AnalysisSource(rawValue: raw) ?? .automatic
         let storedBarCount = d.object(forKey: Keys.visualizerBarCount) as? Int ?? BarCount.default
         visualizerBarCount = BarCount.clamped(storedBarCount)
+        pauseCaptureWhileMenuBarHidden = d.object(forKey: Keys.pauseCaptureWhileMenuBarHidden) as? Bool ?? true
         automaticUpdateChecks = d.object(forKey: Keys.automaticUpdateChecks) as? Bool ?? true
         launchAtLogin = SMAppService.mainApp.status == .enabled
     }
@@ -90,6 +99,7 @@ final class Preferences {
         static let showPillBackground = "showPillBackground"
         static let analysisSource = "analysisSource"
         static let visualizerBarCount = "visualizerBarCount"
+        static let pauseCaptureWhileMenuBarHidden = "pauseCaptureWhileMenuBarHidden"
         static let automaticUpdateChecks = "automaticUpdateChecks"
     }
 }

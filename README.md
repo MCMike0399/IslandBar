@@ -18,13 +18,14 @@ open dist/IslandBar.app
 
 The first time a track plays, macOS asks for **System Audio Recording** so the process tap can drive the bars. Audio is never saved.
 
-Signing is **ad-hoc**. TCC keys the grant to the binary’s cdhash, which changes on every rebuild, so expect **one permission prompt per fresh build**. The entitlements disable library validation so the ad-hoc `libMediaRemoteAdapter.dylib` can load under the hardened runtime (ad-hoc binaries have no Team ID).
+Releases are signed **ad-hoc**. TCC keys the grant to the binary’s cdhash, which changes on every build, so expect **one permission prompt per update**. The entitlements disable library validation so the ad-hoc `libMediaRemoteAdapter.dylib` can load under the hardened runtime (ad-hoc binaries have no Team ID).
 
-Debug logging (state transitions and per-second band levels):
+Local builds can avoid the per-build prompt: `Scripts/dev-signing.sh setup` creates a self-signed development identity in a keychain of its own, and `build.sh` signs with it whenever it exists. The grant is then keyed to that certificate instead of the cdhash, so it is given once and survives every rebuild. Releases never use it.
+
+Debug logging (state transitions and per-second band levels) goes to `~/Library/Logs/IslandBar/debug.log`:
 
 ```bash
-mkdir -p ~/Library/Logs/IslandBar
-ISLANDBAR_DEBUG=1 dist/IslandBar.app/Contents/MacOS/IslandBar
+open --env ISLANDBAR_DEBUG=1 dist/IslandBar.app    # or: Scripts/harness launch
 ```
 
 `ISLANDBAR_FORCE_PROCEDURAL=1` skips the tap and uses the fallback motion (also used when capture is denied).
@@ -36,6 +37,8 @@ Left-click the pill to open the sound card — every source playing on the Mac, 
 Bar colours come from the artwork: pixels are clustered in Oklab (k-means, plus a separate pass over the colourful pixels so a small accent on a dark cover is not averaged away) and the four most distinct dominant colours are ordered by hue and interpolated into a gradient across the bars. The runner-up colours are pulled halfway towards the dominant one, so the gradient reads as a single tint with a soft shift rather than a rainbow. Hue is kept; lightness is lifted and chroma is clamped to a pastel range for legibility on the black pill, and greyscale art gives grey bars. Before artwork arrives the bars show a lavender-to-mist default.
 
 The bars are a waveform, not a bar chart: every bar shares one base and one ceiling, so the outline is whatever the audio is doing rather than a shape drawn in advance. Levels come from twelve log-spaced FFT bands (40 Hz–14 kHz), each measured against its own running mean so steady loud material sits mid-height and transients reach the top. On the way to the screen each band is pulled part-way towards its two neighbours, which turns twelve independently twitching columns into a single moving contour, and peaks land fast while the decay is left to glide.
+
+While the menu bar is hidden — a full-screen video, or a desktop set to hide the menu bar automatically — nobody can see the bars, so IslandBar stops listening: capture halts at once and the recording session behind macOS's purple indicator closes five seconds later. Point at the top of the screen and the menu bar, the bars and the capture all come back together; glance away and back within those five seconds and the same session simply resumes. Revealing it over and over through a film does not open a session per visit: repeat visits are paced like any other tap rebuild, with approximate motion standing in until the next one is due. The sound card keeps capture on while it is open. Settings › **Pause audio capture while the menu bar is hidden** turns this off. The indicator can still show in full screen if an app's volume has been turned down in the card, because that is a recording session of its own.
 
 The pill follows the menu bar, not the Light/Dark setting: on a light menu bar it drops the black capsule and darkens the bars into a mid-dark band of the same hues, so it reads as bars rather than a black blob on white. Settings › **Show island pill background** only applies where there is a pill to draw. `ISLANDBAR_PILL_APPEARANCE=light|dark` forces either rendering, which is the way to see the light one without changing the desktop picture.
 
@@ -166,6 +169,12 @@ To exercise the updater without publishing: `ISLANDBAR_UPDATE_FEED_URL` points t
 
 ## Development notes
 
+[AGENTS.md](AGENTS.md) is the guide for working on the code, and `Scripts/harness` is how a
+change gets checked in the running app: it builds and launches with debug hooks, plays a test
+tone through a real Now Playing session, pins the menu bar hidden or revealed, opens the card,
+dumps internal state, takes screenshots, and runs scripted scenarios that print PASS/FAIL
+(`Scripts/harness check`).
+
 [PITFALLS.md](PITFALLS.md) collects the traps that are expensive to rediscover: the tap UID
 that must be fresh on every creation (a reused one is accepted by Core Audio and then
 delivers empty buffers), TCC grants bound to the ad-hoc signature and how to re-point them
@@ -174,16 +183,8 @@ attribution, and the log order to read when the bars stop moving.
 
 The status item's action needs a real `NSApp.currentEvent`, so a synthetic accessibility
 press never opens the card and there is no way to look at it from a script. Under
-`ISLANDBAR_DEBUG=1` a distributed notification toggles it instead:
-
-```bash
-swift -e 'import Foundation
-DistributedNotificationCenter.default().postNotificationName(
-    Notification.Name("dev.burbuja-lab.islandbar.debugTogglePopover"),
-    object: nil, userInfo: nil, deliverImmediately: true)'
-```
-
-`screencapture -o -x -l <window id>` then captures the card on its own.
+`ISLANDBAR_DEBUG=1` a distributed notification toggles it instead — `Scripts/harness card`,
+and `Scripts/harness shot card` to capture it.
 
 ## License
 
