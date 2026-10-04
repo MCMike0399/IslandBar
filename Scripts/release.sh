@@ -134,6 +134,16 @@ codesign --verify --deep --strict dist/IslandBar.app
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' dist/IslandBar.app/Contents/Info.plist)" == "$VERSION" ]] \
   || { echo "error: built bundle does not carry version $VERSION" >&2; exit 1; }
 
+# Launch what is about to ship, away from this checkout's .build: SwiftPM bakes that
+# directory's absolute path into the binary as a resource fallback, so a mispackaged app
+# runs fine here and traps on launch everywhere else — v0.5.0 did exactly that, and an app
+# that crashes at launch cannot update itself out of it.
+if ! "$ROOT/Scripts/launch-smoke.sh" dist/IslandBar.app; then
+  [[ $DRY_RUN -eq 0 ]] && git checkout -- Resources/Info.plist
+  echo "error: the packaged app does not survive launch; nothing committed" >&2
+  exit 1
+fi
+
 ARCHIVE="dist/IslandBar-$VERSION.zip"
 rm -f "$ARCHIVE" "$ARCHIVE.sig"
 ditto -c -k --keepParent --sequesterRsrc dist/IslandBar.app "$ARCHIVE"

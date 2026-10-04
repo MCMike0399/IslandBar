@@ -618,6 +618,38 @@ that list).
 
 ## Self-update
 
+### A build only proves itself away from its `.build`
+
+SwiftPM's native build system generates `Bundle.module` as "the app's *root* folder, else the
+absolute `.build` path of the machine that compiled it, else `fatalError`". build.sh puts the
+resource bundle in `Contents/Resources` — the only place a signed bundle may hold it — so a
+packaged app never finds it the first way and always takes the second. On the machine that
+built it that path exists, and everything works. Everywhere else it traps at launch:
+
+```
+MediaRemoteAdapter/resource_bundle_accessor.swift:12: Fatal error: could not load resource bundle:
+from …/IslandBar.app/MediaRemoteAdapter_MediaRemoteAdapter.bundle
+or /Users/runner/work/IslandBar/IslandBar/.build/arm64-apple-macosx/release/MediaRemoteAdapter_MediaRemoteAdapter.bundle
+```
+
+It hid for ten releases (v0.2.0–v0.4.1) because they were built in `/Users/burbujamc/Developer/IslandBar`,
+which exists on both of the owner's Macs. v0.5.0 was the first built on a GitHub runner and
+crashed on launch everywhere else — and an app that crashes at launch cannot run its own
+updater, so every copy that took the update had to be reinstalled by hand. It was pulled from
+the feed by marking it a prerelease (the updater reads `releases/latest`, which skips those).
+
+It also does not reproduce locally any more: the Command Line Tools' Swift 6.4 builds with the
+newer build system (products under `.build/out/Products`), whose accessor carries no absolute
+path at all. The runner's older toolchain still generates the one above. A local build being
+fine says nothing about the release.
+
+The vendored adapter now resolves its bundle from `Bundle.main.resourceURL` and never touches
+`Bundle.module`. **Check it:** `Scripts/launch-smoke.sh` launches a packaged app with `.build`
+moved aside and requires it to stay up; release.sh runs it on the runner before publishing,
+and `gh workflow run release.yml -f dry_run=true` runs the whole release there without
+publishing. `strings libMediaRemoteAdapter.dylib | grep /Users/` on a release shows whether a
+build path is baked in.
+
 ### A release key must ship before it signs anything
 
 `UpdateSignature.swift` compiles in the keys a copy will accept, which makes rotating one a

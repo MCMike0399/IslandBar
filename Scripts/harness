@@ -30,7 +30,7 @@
 #
 # Checking it
 #   check [scenario...]   run scenarios and print PASS/FAIL; no argument runs them all:
-#                         smoke playback pause menubar card
+#                         smoke playback pause menubar card packaging
 #
 # Exit codes: 0 pass, 1 a check failed, 2 usage, 3 blocked on the user (the System Audio
 # Recording prompt, see `status`). Read AGENTS.md before relying on this.
@@ -341,13 +341,31 @@ check_card() {
   post debugMenuBar auto
 }
 
+# The packaged app must launch without this checkout's .build (Scripts/launch-smoke.sh).
+# Locally this catches packaging mistakes; the toolchain difference that broke v0.5.0 only
+# shows on the CI runner, where release.sh runs the same script before publishing.
+check_packaging() {
+  say "== packaging (the app launches away from .build)"
+  local was_running=""; [[ -n "$(island_pid)" ]] && was_running=1
+  player_running && post testplayer quit 2>/dev/null || true
+  pkill -x IslandBar || true
+  for _ in $(seq 1 25); do pgrep -x IslandBar >/dev/null || break; sleep 0.2; done
+  if "$ROOT/Scripts/launch-smoke.sh" "$APP" > "$WORK/smoke.log" 2>&1; then
+    pass "dist/IslandBar.app stays up with .build out of the way"
+  else
+    fail "the packaged app does not survive launch: $(sed -n 1p "$WORK/smoke.log")"
+    sed -n '2,6p' "$WORK/smoke.log"
+  fi
+  [[ -n "$was_running" ]] && launch_app >/dev/null
+}
+
 run_checks() {
   local scenarios=("$@")
-  [[ ${#scenarios[@]} -gt 0 ]] || scenarios=(smoke playback pause menubar card)
+  [[ ${#scenarios[@]} -gt 0 ]] || scenarios=(smoke playback pause menubar card packaging)
   build_tools
   for s in "${scenarios[@]}"; do
     case "$s" in
-      smoke|playback|pause|menubar|card) "check_$s" ;;
+      smoke|playback|pause|menubar|card|packaging) "check_$s" ;;
       *) die "unknown scenario: $s" ;;
     esac
   done

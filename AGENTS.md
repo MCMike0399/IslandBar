@@ -22,6 +22,7 @@ has been **seen working in the real app**, not when it compiles. The harness bel
 | `Scripts/harness` | build, drive and check the running app (below) |
 | `Scripts/dev-signing.sh` | stable signing identity for local builds |
 | `Scripts/release.sh` | the one release path, by hand or from CI |
+| `Scripts/launch-smoke.sh` | launch a packaged app away from `.build`; release.sh gates on it |
 | `Tools/Harness` | the harness's Swift helpers: a test player and a notification poster |
 
 ## Verify your work with the harness
@@ -31,7 +32,7 @@ drives it the way a person would, without needing anyone at the Mac:
 
 ```bash
 Scripts/harness build          # ./build.sh, then launch the new build with debug hooks on
-Scripts/harness check          # every scenario: smoke playback pause menubar card
+Scripts/harness check          # every scenario: smoke playback pause menubar card packaging
 Scripts/harness check menubar  # or just the ones you touched
 Scripts/harness restore        # when done: quit, relaunch whatever copy was running before
 ```
@@ -102,6 +103,13 @@ Installed copies find it within six hours and offer it to the user.
   user-facing**: write them for the people installing the update.
 - Before pushing: `swift build` is clean, `Scripts/harness check` passes (or every failure is
   understood and reported), and README/PITFALLS describe what changed.
+- **Releases are built by CI's toolchain, not yours.** The runner's Swift is older than the
+  Command Line Tools here and packages differently (v0.5.0 crashed on launch on every Mac
+  but the runner — PITFALLS.md, "A build only proves itself away from its .build"). After
+  touching the build, packaging, `Package.swift` or `Vendor/`, push with `[skip ci]` and run
+  `gh workflow run release.yml -f dry_run=true` first: it builds, launch-smokes and signs on
+  the runner and publishes nothing. `release.sh` refuses to publish an app that does not
+  survive `Scripts/launch-smoke.sh`.
 - A minor or major version: push with `[skip ci]` in the last commit's message, then
   `gh workflow run release.yml -f version=X.Y.0` and watch it with `gh run watch`.
 - Docs-only or harness-only pushes that should not ship: `[skip ci]`.

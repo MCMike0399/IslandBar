@@ -4,8 +4,25 @@ import Foundation
 
 public class MediaController {
 
+    // PATCH (IslandBar): look in the host app's Contents/Resources first, where build.sh
+    // puts the resource bundle. SwiftPM's generated `Bundle.module` only checks the app's
+    // *root* folder and then the absolute `.build` path of the machine that compiled it,
+    // and traps when neither exists. That path happened to exist on the Macs that built
+    // the early releases, so they ran; v0.5.0, the first built on a GitHub runner, looked
+    // for /Users/runner/work/… and crashed at launch on every other Mac.
+    private static let resourceBundle: Bundle? = {
+        let name = "MediaRemoteAdapter_MediaRemoteAdapter.bundle"
+        if let resources = Bundle.main.resourceURL,
+           let bundle = Bundle(url: resources.appendingPathComponent(name)) {
+            return bundle
+        }
+        // `swift run` and tests: no app bundle, but the build directory is right there.
+        let buildDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+        return Bundle(url: buildDir.appendingPathComponent(name))
+    }()
+
     private var perlScriptPath: String? {
-        guard let path = Bundle.module.path(forResource: "run", ofType: "pl") else {
+        guard let path = Self.resourceBundle?.path(forResource: "run", ofType: "pl") else {
             assertionFailure("run.pl script not found in bundle resources.")
             return nil
         }
