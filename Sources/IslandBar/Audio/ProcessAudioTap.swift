@@ -269,6 +269,9 @@ final class TapController: @unchecked Sendable {
     /// True while the menu bar is hidden (a full-screen space): playback goes on, but
     /// nothing can see the bars, so there is nothing to capture for.
     private var captureSuspended = false
+    /// True while the bar is showing only because the pointer is up in it (see
+    /// `MenuBarAutoHide.isRevealedByPointer`). Only these reveals are paced.
+    private var revealedByPointer = false
     private var prefs = PreferencesSnapshot(
         showPillBackground: true,
         analysisSource: .automatic,
@@ -391,7 +394,8 @@ final class TapController: @unchecked Sendable {
         queue.async { [self] in
             DebugLog.line(
                 "state tap phase=\(phase) tapExists=\(tap.isRunning) engine=\(tap.isEngineStarted) "
-                    + "analyzer=\(analyzer.isRunning) pump=\(pump.isRunning) suspended=\(captureSuspended) "
+                    + "analyzer=\(analyzer.isRunning) procedural=\(procedural.isRunning) pump=\(pump.isRunning) "
+                + "suspended=\(captureSuspended) pointerReveal=\(revealedByPointer) "
                     + "teardownPending=\(pauseTeardownWork != nil) permissionDenied=\(permissionDenied)"
             )
         }
@@ -401,6 +405,7 @@ final class TapController: @unchecked Sendable {
         session: NowPlayingSession?,
         isPlaying: Bool,
         captureSuspended: Bool,
+        revealedByPointer: Bool,
         preferences: PreferencesSnapshot
     ) {
         queue.async { [weak self] in
@@ -408,6 +413,7 @@ final class TapController: @unchecked Sendable {
                 session: session,
                 isPlaying: isPlaying,
                 captureSuspended: captureSuspended,
+                revealedByPointer: revealedByPointer,
                 preferences: preferences
             )
         }
@@ -417,6 +423,7 @@ final class TapController: @unchecked Sendable {
         session: NowPlayingSession?,
         isPlaying: Bool,
         captureSuspended: Bool,
+        revealedByPointer: Bool,
         preferences: PreferencesSnapshot
     ) {
         let sessionChanged = session != self.session
@@ -425,6 +432,7 @@ final class TapController: @unchecked Sendable {
         self.session = session
         self.isPlaying = isPlaying
         self.captureSuspended = captureSuspended
+        self.revealedByPointer = revealedByPointer
         self.prefs = preferences
 
         if preferences.barCount != barCount {
@@ -506,6 +514,10 @@ final class TapController: @unchecked Sendable {
     private func reconfigureBars(count: Int) {
         let wasPlaying = isPlaying
         let tapWasActive = phase.isTapping && tap.isRunning
+        // Procedural motion is a decision `renewTap` made (no grant, no target); with
+        // neither a tap nor that decision — a reveal waiting out its backoff — the bars
+        // stay at rest rather than pretend to listen.
+        let proceduralWasRunning = procedural.isRunning
         analyzer.stop()
         procedural.stop()
         pump.stop()
@@ -522,7 +534,7 @@ final class TapController: @unchecked Sendable {
         if wasPlaying && !captureSuspended {
             if tapWasActive {
                 attachAnalyzer()
-            } else {
+            } else if proceduralWasRunning {
                 procedural.start()
             }
             pump.start()
@@ -617,21 +629,38 @@ final class TapController: @unchecked Sendable {
                 scheduleReselect(after: Self.pollInterval(for: phase))
                 return
             }
-            guard now - tapStartedAt >= Self.minTapResidency, now >= nextRebuildAt else {
+            // Another app taking over Now Playing starts a new playing session, and the
+            // backoff belongs to the old one. Holding it left the tap on an app that had
+            // stopped — the analyzer gets no samples from it, so the bars froze on their
+            // last frame — for as long as the backoff had climbed, which hidden-menu-bar
+            // reveals take to its five-minute cap within one film. The residency still
+            // applies, so two sessions trading places cannot rebuild faster than that.
+            guard now - tapStartedAt >= Self.minTapResidency, now >= nextRebuildAt || sessionPIDChanged else {
                 scheduleReselect(after: 3)
                 return
+            }
+            if sessionPIDChanged {
+                rebuildsThisSession = 0
+                rebuildPacedByMenuBar = false
             }
         }
 
         // Each reveal of a hidden menu bar after its teardown grace is a fresh recording
         // session, and a hand that checks the menu bar every half minute through a film would
         // open one per visit — the rate at which macOS starts warning that the app asks to
-        // record too often. So those taps keep the playing session's backoff, and a reveal
-        // that comes too soon shows procedural motion until the backoff runs out.
-        if !phase.isTapping, rebuildPacedByMenuBar, now < nextRebuildAt {
-            if !procedural.isRunning { procedural.start() }
+        // record too often. So pointer reveals keep the playing session's backoff, and one
+        // that comes too soon leaves the bars at rest until the backoff runs out. Not
+        // procedural motion: that is the no-permission fallback, and showing it while
+        // nothing listens looked like the visualizer had broken — for up to five minutes.
+        // Leaving full screen and opening the card are deliberate, like resuming playback
+        // (which is not paced either), so they listen at once.
+        if !phase.isTapping, rebuildPacedByMenuBar, revealedByPointer, now < nextRebuildAt {
+            if procedural.isRunning {
+                procedural.stop()
+                shared.publish(bars: BarLevels.rest(count: barCount).values, rmsDb: -120, fromTap: false)
+            }
             DebugLog.line(
-                "tap rebuild deferred \(Int((nextRebuildAt - now).rounded(.up)))s reason=\(reason); procedural meanwhile"
+                "tap rebuild deferred \(Int((nextRebuildAt - now).rounded(.up)))s reason=\(reason); bars at rest meanwhile"
             )
             scheduleReselect(after: nextRebuildAt - now)
             return

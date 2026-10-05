@@ -77,6 +77,7 @@ Scripts/harness restore        # when done: quit, relaunch whatever copy was run
 | `pause` | capture stops on pause and comes back | Audio, NowPlaying |
 | `menubar` | capture suspends while the menu bar is hidden; pacing of repeat reveals | StatusItem, Audio |
 | `card` | the open card keeps capture on | Popover, StatusItem |
+| `switch` | another app taking over Now Playing gets its own tap without waiting out the old backoff | Audio, NowPlaying |
 | `packaging` | the built app launches away from `.build` | build.sh, Package.swift, Vendor, resources |
 | `update` | a release that cannot start is rolled back and skipped; a good one is kept | Updates, App launch path |
 

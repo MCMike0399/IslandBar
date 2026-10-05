@@ -387,6 +387,21 @@ cross-queue methods to a `stop()`-style flag flip plus a `DispatchQueue.main.asy
 `Task { @MainActor }`: the async block also keeps FIFO order with the timer a following
 `start()` resumes, which is what stops a pause→play from easing in from stale heights.
 
+### A new Now Playing app is a new playing session
+
+The rebuild backoff (20 … 300 s) counts rebuilds within one playing session, and it used to
+apply when Now Playing moved to a different app too. The tap then stayed on the app that had
+stopped; a tap on a silent or dead process delivers no samples, the analyzer publishes nothing
+without samples, and the bars froze on their last frame until the backoff ran out. Hidden-menu-
+bar reveals climb the backoff to its cap within one film, so switching from the film to music
+froze the pill for up to five minutes. A session whose pid changed now rebuilds once
+`minTapResidency` (15 s) has passed and starts its own pacing from zero; the residency is what
+keeps two sessions trading places from churning.
+
+**Recognize it:** identical `bandLevels=… fromTap=true` lines second after second, a `session
+bundle=` line for another app, and no `tap created` until `reason=poll` minutes later.
+**Check it:** `Scripts/harness check switch`.
+
 ## Churn bookkeeping
 
 Every tap creation is a **recording session** as far as macOS is concerned: it writes a
@@ -563,9 +578,17 @@ point. A reveal inside the grace restarts the same engine, so glancing at the me
 open a recording session per glance. A reveal *after* the grace is a new session, and someone
 who checks the menu bar every half minute through a film would open one per visit — the rate at
 which macOS starts warning that an app asks to record too often. So a menu-bar teardown keeps
-the playing session's rebuild backoff (20, 45, 90, 180, 300 s), and a reveal inside it shows
-procedural motion until the backoff runs out (`tap rebuild deferred` in the log). A pause resets
-it, as it always did. If a pause's 30 s teardown is pending when the bar hides, the sooner 5 s
+the playing session's rebuild backoff (20, 45, 90, 180, 300 s), and a pointer reveal inside it
+leaves the bars at rest until the backoff runs out (`tap rebuild deferred` in the log). A pause
+resets it, as it always did.
+
+Only *pointer* reveals are paced (`MenuBarAutoHide.isRevealedByPointer`). The first version
+paced every return and filled the wait with procedural motion, and it read as the visualizer
+breaking: the fallback animation, plainly not following the music, for up to five minutes — on
+a plain desktop, too, after leaving a film's full screen, because by then the backoff had climbed
+to its cap. Leaving full screen and opening the card are deliberate and happen at the pace of a
+hand, like resuming playback, which was never paced; they listen at once. And no motion during
+the wait: procedural is the answer to "cannot capture", not to "chose not to yet". If a pause's 30 s teardown is pending when the bar hides, the sooner 5 s
 one replaces it. Every path that could build a tap — polls, wake, output
 and process-list changes — goes through `renewTap`, which refuses while suspended; that one
 guard is what keeps the hidden state clean.
@@ -573,6 +596,8 @@ guard is what keeps the hidden state clean.
 The card counts as visible because it stays open after the pointer has moved down into it,
 out of the menu bar region, and its bars are live.
 
+**Recognize it:** `tap rebuild deferred … procedural meanwhile` (0.5.2 and earlier), or
+`state tap … procedural=true pointerReveal=…` while `tapExists=false` and no denial.
 **Check it:** `Scripts/harness check menubar card`.
 
 ### A background process cannot enter full screen

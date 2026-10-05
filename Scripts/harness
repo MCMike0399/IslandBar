@@ -30,7 +30,7 @@
 #
 # Checking it
 #   check [scenario...]   run scenarios and print PASS/FAIL; no argument runs them all:
-#                         smoke playback pause menubar card packaging update
+#                         smoke playback pause menubar card switch packaging update
 #
 # Exit codes: 0 pass, 1 a check failed, 2 usage, 3 blocked on the user (the System Audio
 # Recording prompt, see `status`). Read AGENTS.md before relying on this.
@@ -307,18 +307,53 @@ check_menubar() {
   seen 'tap created' >/dev/null && fail "a quick hide/reveal opened a new recording session" \
     || pass "no new recording session for a quick glance"
 
-  # A second full hide/reveal inside the backoff must not open another session at once:
-  # the reveal shows procedural motion until the backoff (20 s after the second tap) ends.
+  # A second pointer reveal inside the backoff must not open another session at once.
+  # Until the backoff (20 s after the second tap) ends the bars hold still: nothing is
+  # listening, and the procedural animation it used to show read as a broken visualizer.
   mark
   post debugMenuBar hidden
   wait_for 'tap torn down reason=menu-bar-hidden' 9 >/dev/null || fail "second teardown did not happen"
   mark
   post debugMenuBar revealed
-  wait_for 'tap rebuild deferred' 4 >/dev/null \
-    && pass "a repeat reveal inside the backoff defers the new session" \
-    || fail "a repeat reveal opened a session immediately (no pacing)"
-  wait_for 'tap created .*reason=poll' 25 >/dev/null \
+  local deferred defer_s=20
+  if deferred="$(wait_for 'tap rebuild deferred' 4)"; then
+    pass "a repeat reveal inside the backoff defers the new session"
+    # 13 s from a fresh session, but the backoff climbs with every tap the run inherits.
+    defer_s="$(sed -n 's/.*deferred \([0-9]*\)s.*/\1/p' <<< "$deferred")"
+  else
+    fail "a repeat reveal opened a session immediately (no pacing)"
+  fi
+  local procedural; procedural="$(state_field procedural)"
+  [[ "$procedural" == "false" ]] \
+    && pass "state: no procedural motion while the session is deferred" \
+    || fail "state: procedural motion while deferred (procedural=$procedural)"
+  mark
+  wait_for 'tap created .*reason=poll' "$((defer_s + 5))" >/dev/null \
     && pass "the deferred tap arrives once the backoff ends" || fail "no tap after the backoff ended"
+
+  # Leaving the hidden menu bar for good (out of full screen, back to a desktop) is a
+  # deliberate return, like resuming playback: it listens at once, backoff or not.
+  mark
+  post debugMenuBar hidden
+  wait_for 'tap torn down reason=menu-bar-hidden' 9 >/dev/null || fail "third teardown did not happen"
+  mark
+  post debugMenuBar auto
+  wait_for 'tap created .*reason=menu-bar-shown' 4 >/dev/null \
+    && pass "back on a plain desktop inside the backoff, capture starts at once" \
+    || fail "back on a plain desktop, capture was deferred"
+  seen 'tap rebuild deferred' >/dev/null && fail "the return to the desktop was paced like a glance" \
+    || pass "the return to the desktop was not paced"
+
+  # Opening the card is just as deliberate.
+  mark
+  post debugMenuBar hidden
+  wait_for 'tap torn down reason=menu-bar-hidden' 9 >/dev/null || fail "fourth teardown did not happen"
+  mark
+  post debugTogglePopover
+  wait_for 'tap created .*reason=menu-bar-shown' 4 >/dev/null \
+    && pass "opening the card inside the backoff captures at once" \
+    || fail "opening the card inside the backoff was deferred"
+  post debugTogglePopover
 
   post debugMenuBar auto
 }
@@ -339,6 +374,52 @@ check_card() {
   wait_for 'capture engine stopped reason=menu-bar-hidden' 6 >/dev/null \
     && pass "closing the card stops capture again" || fail "capture kept running after the card closed"
   post debugMenuBar auto
+}
+
+# Now Playing moving to another app is a new playing session: its tap must not wait out
+# the backoff the old one ran up (hidden-menu-bar reveals climb it fast). The old app's tap
+# feeds nothing once it stops, and the bars froze on its last frame for up to five minutes.
+check_switch() {
+  say "== switch (a new Now Playing app gets its own tap, whatever the backoff)"
+  ensure_capturing || return
+  local old_pid; old_pid="$(pgrep -n -x IslandBarTestPlayer || true)"
+  # Two pointer reveals after a teardown run the backoff up to at least 45 s (the second
+  # waits out the first one's 20 s, which is the point).
+  local i
+  for i in 1 2; do
+    mark
+    post debugMenuBar hidden
+    wait_for 'tap torn down reason=menu-bar-hidden' 9 >/dev/null || { fail "teardown $i did not happen"; post debugMenuBar auto; return; }
+    mark
+    post debugMenuBar revealed
+    local got wait_s=5
+    got="$(wait_for 'tap created|tap rebuild deferred' 5)" || true
+    if [[ "$got" == *deferred* ]]; then
+      wait_s=$(( $(sed -n 's/.*deferred \([0-9]*\)s.*/\1/p' <<< "$got") + 5 ))
+    fi
+    wait_for 'tap created' "$wait_s" >/dev/null || { fail "no tap after reveal $i"; post debugMenuBar auto; return; }
+  done
+  post debugMenuBar auto
+  # The second player starts before the first goes, so the session moves from one app to
+  # another rather than ending (an ended session resets the pacing and would prove nothing).
+  mark
+  local log2="$WORK/player2.log"; : > "$log2"
+  open -n --stdout "$log2" --stderr "$log2" "$PLAYER_APP" --args --title "Harness switch $(date +%H%M%S)" --level 0.05
+  local new_pid=""
+  for _ in $(seq 1 50); do
+    new_pid="$(pgrep -n -x IslandBarTestPlayer || true)"
+    [[ -n "$new_pid" && "$new_pid" != "$old_pid" ]] && break
+    sleep 0.2
+  done
+  wait_for "session bundle=$PLAYER_ID pid=$new_pid " 10 >/dev/null \
+    || { fail "the second player never became the Now Playing session"; return; }
+  [[ -n "$old_pid" ]] && kill "$old_pid" 2>/dev/null || true
+  # Within the 15 s residency, not after the backoff.
+  wait_for "tap source=.* pid=$new_pid" 20 >/dev/null \
+    && pass "the new app's tap arrives without waiting out the old backoff" \
+    || fail "the tap stayed on the old app (paced by its backoff)"
+  wait_for 'tap IO alive' 5 >/dev/null \
+    && pass "the new app's tap delivers audio" || fail "no IO from the new app's tap"
 }
 
 # The packaged app must launch without this checkout's .build (Scripts/launch-smoke.sh).
@@ -485,11 +566,11 @@ check_update() {
 
 run_checks() {
   local scenarios=("$@")
-  [[ ${#scenarios[@]} -gt 0 ]] || scenarios=(smoke playback pause menubar card packaging update)
+  [[ ${#scenarios[@]} -gt 0 ]] || scenarios=(smoke playback pause menubar card switch packaging update)
   build_tools
   for s in "${scenarios[@]}"; do
     case "$s" in
-      smoke|playback|pause|menubar|card|packaging|update) "check_$s" ;;
+      smoke|playback|pause|menubar|card|switch|packaging|update) "check_$s" ;;
       *) die "unknown scenario: $s" ;;
     esac
   done

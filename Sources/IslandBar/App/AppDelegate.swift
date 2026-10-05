@@ -189,6 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // so there is no reason to hold a recording session, and its indicator, open.
             // Pointing at the top of the screen reveals the bar and brings capture back.
             let suspended = preferences.pauseCaptureWhileMenuBarHidden && !menuBarAutoHide.isVisible
+            let pointerReveal = preferences.pauseCaptureWhileMenuBarHidden && menuBarAutoHide.isRevealedByPointer
             if prefs.barCount != lastAppliedBarCount {
                 lastAppliedBarCount = prefs.barCount
                 store.barCount = prefs.barCount
@@ -206,11 +207,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     store.barLevels = BarLevels.rest(count: prefs.barCount)
                 }
                 tapController.apply(
-                    session: session, isPlaying: playing, captureSuspended: suspended, preferences: prefs
+                    session: session, isPlaying: playing, captureSuspended: suspended,
+                    revealedByPointer: pointerReveal, preferences: prefs
                 )
             } else {
                 tapController.apply(
-                    session: session, isPlaying: playing, captureSuspended: suspended, preferences: prefs
+                    session: session, isPlaying: playing, captureSuspended: suspended,
+                    revealedByPointer: pointerReveal, preferences: prefs
                 )
             }
         } onChange: { [weak self] in

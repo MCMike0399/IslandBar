@@ -34,6 +34,10 @@ final class MenuBarAutoHide {
     /// Whether anything IslandBar draws can be seen: the menu bar is showing — always, or
     /// because the pointer has revealed it — or the card is open.
     var isVisible: Bool { !isActive || animationAllowed || cardIsOpen }
+    /// Visible only because the pointer is up in a bar that hides itself. Unlike leaving
+    /// full screen or opening the card, this happens by the dozen during a film — often by
+    /// accident — so the capture paces the recording sessions it opens for it.
+    var isRevealedByPointer: Bool { isActive && animationAllowed && !cardIsOpen }
 
     /// Slower than the eye and far slower than the thing it is gating. Pointing at the menu
     /// bar starts the bars within a fifth of a second, which reads as immediate.
