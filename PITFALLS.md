@@ -552,14 +552,32 @@ menu bar auto-hide=on
 pill animation allowed=false        # ...and the bar goes back up
 ```
 
-### There is no public API for "is this space full screen"
+### Ask the window server, not the windows, whether a space is full screen
 
-`NSScreen.visibleFrame` does not change in a full-screen space (measured: 1084 pt of a
-1117 pt screen, in and out), `NSMenu.menuBarVisible()` stays `true`, and the WindowServer's
-`Menubar` window only reports what the bug is already breaking. So `MenuBarAutoHide` reads the
-space instead: every ordinary layer-0 window on it belongs to one application, and that
-application has a window as wide as a display whose height is the display's or the display's
-less the menu bar. Both heights are needed — the short one *is* the held-open state.
+There is no public API for it. `NSScreen.visibleFrame` does not change in a full-screen space
+(measured: 1084 pt of a 1117 pt screen, in and out), `NSMenu.menuBarVisible()` stays `true`,
+and the WindowServer's `Menubar` window only reports what the bug is already breaking.
+
+Up to 0.5.3 `MenuBarAutoHide` guessed from the windows: every ordinary layer-0 window on the
+space belongs to one application, and that application has a window as wide as a display whose
+height is the display's or the display's less the menu bar. The short height *is* the
+held-open state — and it is also exactly the size of an ordinary window zoomed to fill a
+desktop (`0,33 1512x949` on a 14-inch screen). With a maximised browser the only app on
+screen, the guess said full screen, capture stopped, and the bars froze in plain sight until
+another app's window appeared: 9.5 s on 2026-10-16, and dozens of shorter runs in the days
+before. It also missed real full screen: polled every 500 ms on three full-screen spaces, it
+read `true` for the first 2–3 s and `false` after.
+
+So it now asks the private CoreGraphics SPI the window server answers from:
+`CGSSpaceGetType(CGSMainConnectionID(), CGSGetActiveSpace(cid))` is 4 for a full-screen space
+(split view included) and 0 for a desktop. The same poll read 4 on every full-screen space,
+for as long as it was up, and 0 on every desktop. The symbols are looked up with `dlsym`; if
+they ever vanish, the window guess comes back as the fallback.
+
+**Recognize it:** `menu bar auto-hide=on` in the log while the menu bar is plainly showing and
+no window is full screen.
+**Check it:** compare the space type with what is on screen — a probe that prints
+`CGSSpaceGetType` next to `CGWindowListCopyWindowInfo` while you move between spaces.
 
 The inset comes from `screen.frame.maxY - screen.visibleFrame.maxY`, never from
 `NSStatusBar.system.thickness`: on a notched Mac the bar is 33 pt and that property still

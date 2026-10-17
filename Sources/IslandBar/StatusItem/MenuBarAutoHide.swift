@@ -103,7 +103,7 @@ final class MenuBarAutoHide {
 
     private func reevaluate() {
         guard forced == nil else { return }
-        let active = Self.hidesMenuBarAlways || Self.spaceIsFullScreen()
+        let active = Self.hidesMenuBarAlways || (Self.activeSpaceIsFullScreen ?? Self.spaceIsFullScreen())
         guard active != isActive else { return }
         isActive = active
         DebugLog.line("menu bar auto-hide=\(active ? "on" : "off")")
@@ -150,8 +150,31 @@ final class MenuBarAutoHide {
     /// Stage Manager puts its own layer-0 windows up during a space switch.
     private static let systemOwners: Set<String> = ["WindowManager", "Window Server", "Dock"]
 
-    /// A full-screen space, recognised by what is in it rather than by asking — there is no
-    /// public API that answers this for another app's window.
+    /// The window server's own type for the space the user is looking at: 4 is a
+    /// full-screen space, split view included; a desktop is 0. Private SPI from
+    /// CoreGraphics, so it is looked up once and kept optional — `nil` means the symbols are
+    /// gone and `spaceIsFullScreen()` guesses from the windows instead.
+    ///
+    /// The guess cannot tell a full-screen window squeezed by a held-open menu bar from an
+    /// ordinary window zoomed to fill a desktop: both sit at `0,33 1512x949` on a 14-inch
+    /// screen. With one app on screen, a maximised browser read as full screen, capture
+    /// stopped and the bars froze in plain sight until another app's window came up
+    /// (measured 2026-10-16: 9.5 s, `menu bar auto-hide=on` with the bar showing).
+    private static let activeSpaceIsFullScreenSPI: (() -> Bool)? = {
+        guard let handle = dlopen(nil, RTLD_NOW),
+              let connection = dlsym(handle, "CGSMainConnectionID"),
+              let activeSpace = dlsym(handle, "CGSGetActiveSpace"),
+              let spaceType = dlsym(handle, "CGSSpaceGetType") else { return nil }
+        let cid = unsafeBitCast(connection, to: (@convention(c) () -> Int32).self)()
+        let active = unsafeBitCast(activeSpace, to: (@convention(c) (Int32) -> UInt64).self)
+        let type = unsafeBitCast(spaceType, to: (@convention(c) (Int32, UInt64) -> Int32).self)
+        return { type(cid, active(cid)) == 4 }
+    }()
+
+    private static var activeSpaceIsFullScreen: Bool? { activeSpaceIsFullScreenSPI?() }
+
+    /// A full-screen space, recognised by what is in it rather than by asking. The fallback
+    /// for when the SPI above is missing; it misreads a window zoomed to fill a desktop.
     ///
     /// Two marks together, because either alone is ambiguous. Every ordinary window on the
     /// current space belongs to one application, which is what a full-screen space *is*; and
