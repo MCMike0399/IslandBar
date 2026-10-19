@@ -1,0 +1,24 @@
+== rendering (a closed card releases its views and stops drawing)
+PASS  open 1: pill and card both receive levels
+PASS  open 1: the card's bars are drawing
+PASS  close 1: the card's view tree is released
+PASS  close 1: only the pill receives levels
+PASS  close 1: no hidden glow drawing
+PASS  open 2: pill and card both receive levels
+PASS  open 2: the card's bars are drawing
+PASS  close 2: the card's view tree is released
+PASS  close 2: only the pill receives levels
+PASS  close 2: no hidden glow drawing
+== artwork (bounded decoding through the real Now Playing session)
+PASS  4096 px artwork is bounded to 256 px
+PASS  cover colours survive decoding
+PASS  transparent artwork keeps its alpha
+PASS  portrait artwork stays bounded and keeps its aspect ratio
+PASS  small artwork is not enlarged
+PASS  EXIF orientation is applied
+PASS  invalid artwork is rejected
+player: playing "Harness artwork 124146"
+PASS  artwork reaches the palette through MediaRemote
+PASS  the real app retains a 256 px cover from the Now Playing session
+
+ALL PASSED (rendering artwork)

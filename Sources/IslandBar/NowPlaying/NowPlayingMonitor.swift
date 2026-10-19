@@ -255,6 +255,7 @@ final class NowPlayingMonitor: MediaTransport {
                 artwork = cached
             } else {
                 artwork = Data(base64Encoded: encoded).flatMap(ArtworkImage.decode) ?? payload.artwork
+                    ?? (store.session?.paletteKey == key ? store.session?.artwork : nil)
             }
         } else {
             artwork = payload.artwork

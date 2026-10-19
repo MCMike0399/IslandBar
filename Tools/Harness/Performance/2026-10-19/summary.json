@@ -190,6 +190,9 @@
     "updater": "initial healthy-copy launch hit LaunchServices -600; launch retry fixed the harness; broken rollback and healthy retention passed in update-rerun.txt",
     "negative_control": "old app fails all six closed-card assertions while open-card drawing passes, in rendering-before.txt",
     "cleanup_safety": "injected launch failure restored a nonempty sentinel preference; original preference snapshot restored afterward",
-    "supplementary_audio_repeat": "exit 3, blocked on macOS System Audio Recording after the ad-hoc update fixture; no app code changed since the earlier passing real-audio run"
+    "supplementary_audio_repeat": "exit 3, blocked on macOS System Audio Recording after the ad-hoc update fixture; no app code changed since the earlier passing real-audio run",
+    "rendering_and_artwork_repeat": "passed again using the procedural fallback; rendering-artwork-rerun.txt",
+    "screenshot": "unavailable: screencapture could not create an image from the closed-lid display",
+    "ci_dry_run_initial": "success: https://github.com/MCMike0399/IslandBar/actions/runs/39304535572"
   }
 }
