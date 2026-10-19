@@ -236,6 +236,14 @@ final class StatusItemController: NSObject {
         togglePopover()
     }
 
+    func debugDumpState() {
+        DebugLog.line(
+            "state rendering cardContent=\(popover.contentViewController != nil) "
+                + "levelObservers=\(store.levelObserverCount) commits=\(BarsLayerView.debugCommits) "
+                + "glowCommits=\(BarsLayerView.debugGlowCommits)"
+        )
+    }
+
     private func togglePopover() {
         guard let button = statusItem.button else { return }
         if popover.isShown {
@@ -453,6 +461,10 @@ final class StatusItemController: NSObject {
 extension StatusItemController: NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         removeClickAwayMonitors()
+        // NSPopover retains its controller after closing. That kept the marquee's
+        // timeline and the glowing bars running offscreen; the next open already
+        // builds a fresh controller, so release this one's view tree now.
+        popover.contentViewController = nil
         menuBarAutoHide.cardIsOpen = false
         mixer.setPopoverOpen(false)
         system.setPopoverOpen(false)

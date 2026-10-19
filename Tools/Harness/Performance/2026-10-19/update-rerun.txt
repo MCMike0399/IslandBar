@@ -1,0 +1,12 @@
+== update (a release that cannot start is rolled back; one that can is kept)
+PASS  a signed update to 99.0.0 installs
+PASS  the update that could not start was rolled back to 0.5.4
+PASS  the previous app is back in place
+PASS  the failed version is skipped from now on
+_LSOpenURLsWithCompletionHandler() failed with error -600.
+PASS  a signed update to 99.0.1 installs
+PASS  the new version reports a healthy launch
+PASS  the new version stays in place
+PASS  no rollback for a healthy update
+
+ALL PASSED (update)

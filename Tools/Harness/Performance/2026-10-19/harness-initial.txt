@@ -1,0 +1,64 @@
+== smoke
+PASS  app is running and answers state dumps
+PASS  the running process logged its own launch
+== playback
+player: playing "Harness playback 122449"
+PASS  Now Playing session reached the app
+PASS  process tap created
+PASS  tap is delivering audio (samplesRead=95232)
+PASS  bars are moving (4 distinct levels in 4 s)
+PASS  playing state applied
+== pause
+PASS  pause stops the capture engine
+PASS  resume brings capture back
+== menubar (capture pauses while the menu bar is hidden)
+PASS  hiding the menu bar stops capture at once
+PASS  the tap (recording session, purple dot) is torn down after the grace
+PASS  state: no tap while hidden
+PASS  revealing the menu bar builds a fresh tap
+PASS  state: capturing again
+PASS  a quick hide/reveal restarts the same engine
+PASS  no new recording session for a quick glance
+PASS  a repeat reveal inside the backoff defers the new session
+PASS  state: no procedural motion while the session is deferred
+PASS  the deferred tap arrives once the backoff ends
+PASS  back on a plain desktop inside the backoff, capture starts at once
+PASS  the return to the desktop was not paced
+PASS  opening the card inside the backoff captures at once
+== card (capture stays on while the card is open over a hidden menu bar)
+PASS  opening the card resumes capture
+PASS  state: card is open
+PASS  closing the card stops capture again
+== rendering (a closed card releases its views and stops drawing)
+PASS  open 1: pill and card both receive levels
+PASS  open 1: the card's bars are drawing
+PASS  close 1: the card's view tree is released
+PASS  close 1: only the pill receives levels
+PASS  close 1: no hidden glow drawing
+PASS  open 2: pill and card both receive levels
+PASS  open 2: the card's bars are drawing
+PASS  close 2: the card's view tree is released
+PASS  close 2: only the pill receives levels
+PASS  close 2: no hidden glow drawing
+== artwork (bounded decoding through the real Now Playing session)
+PASS  4096 px artwork is bounded to 256 px
+PASS  cover colours survive decoding
+PASS  transparent artwork keeps its alpha
+PASS  portrait artwork keeps its aspect ratio
+PASS  small artwork is not enlarged
+PASS  EXIF orientation is applied
+PASS  invalid artwork is rejected
+player: playing "Harness artwork 122551"
+PASS  artwork reaches the palette through MediaRemote
+PASS  the real app retains a 256 px cover from the Now Playing session
+== switch (a new Now Playing app gets its own tap, whatever the backoff)
+PASS  the new app's tap arrives without waiting out the old backoff
+PASS  the new app's tap delivers audio
+== packaging (the app launches away from .build)
+PASS  dist/IslandBar.app stays up with .build out of the way
+== update (a release that cannot start is rolled back; one that can is kept)
+PASS  a signed update to 99.0.0 installs
+PASS  the update that could not start was rolled back to 0.5.4
+PASS  the previous app is back in place
+PASS  the failed version is skipped from now on
+_LSOpenURLsWithCompletionHandler() failed with error -600.

@@ -1,0 +1,12 @@
+== smoke
+PASS  app is running and answers state dumps
+PASS  the running process logged its own launch
+== playback
+player: playing "Harness playback 123314"
+PASS  Now Playing session reached the app
+BLOCKED  IslandBar is waiting on the System Audio Recording prompt.
+         Ask the user to click Allow (System Settings › Privacy & Security ›
+         Screen & System Audio Recording if no prompt is visible), then re-run.
+         It returns after every rebuild: the signature is ad-hoc, so run all
+         checks against one build. Scripts/grant-audio-permission.sh avoids it
+         when this terminal has Full Disk Access.

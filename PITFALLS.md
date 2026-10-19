@@ -6,6 +6,40 @@ instead of leaving it in a chat log.
 
 ## Popover
 
+### Closing a popover keeps its content alive
+
+`NSPopover` retains its `contentViewController` after `popoverDidClose`. The card already
+creates a fresh controller on every open, but leaving the old one attached kept its
+`MarqueeText` timeline running at 30 Hz and its glowing bars subscribed to 60 Hz levels
+while closed. A profiler sample showed `TimelineView.UpdateFilter` and `MarqueeText.body`
+after dismissal; state dumps still showed two level observers. Even hiding the menu bar,
+which stops the level pump, left the hidden title scrolling.
+
+Release `contentViewController` in `popoverDidClose`. **Check it:**
+`Scripts/harness check rendering` opens and closes the card twice, requires its bars to move
+on each open, and asserts that closing leaves one observer and no further glow commits.
+The check failed against the retained-controller build before the fix.
+
+### A small artwork frame does not bound its decoded image
+
+The card draws artwork at 80 pt and the palette samples it at 48 px, but drawing an
+`NSImage(data:)` can still decode and cache a multi-megapixel original. Browser enrichment
+also caches multiple covers. `ArtworkImage.decode` thumbnails raster data with ImageIO before
+either consumer draws it, preserving orientation and alpha, with a 256 px ceiling. Repeated
+MediaRemote artwork bytes reuse the current decoded cover. Formats ImageIO cannot thumbnail
+retain the previous NSImage fallback.
+
+**Check it:** `Scripts/harness check artwork` publishes a 4096 px cover through the real
+player, requires a 256 px retained image and an artwork palette, and checks colour, alpha,
+aspect ratio, small images and EXIF orientation. `NSCGImageSnapshotRep.pixelsWide` can report
+twice the actual CGImage width on Retina; an explicit `NSBitmapImageRep` keeps the retained
+pixel dimensions unambiguous.
+
+For resource comparisons, `Scripts/harness resources 20` reports interval CPU (100% is one
+core) and mean physical footprint. `proc_pid_rusage` CPU times are Mach ticks, so convert with
+`mach_timebase_info`; treating them as nanoseconds understated CPU by about 42 times on M5.
+The probe was calibrated against a busy process at about 98% of one core.
+
 ### `NSPopover.animates` slides the card's contents across the screen
 
 The open animation grows the *window* from the status item — 123x94, 238x182, 366x279 — and
@@ -631,6 +665,31 @@ menu bar through a debug hook that pins `MenuBarAutoHide`'s reading, and real fu
 `CGWindowListCopyWindowInfo` shows its window at its windowed size.
 
 ## Test harness
+
+### LaunchServices can still remember a pid after it exits
+
+The update scenario's healthy-copy launch returned `_LSOpenURLsWithCompletionHandler`
+error `-600` immediately after the rolled-back app exited, although `pgrep` was already
+empty. Retrying the launch request succeeded; the scenario still requires installation,
+the exact healthy-version marker and no rollback. This is a harness retry, not a retry in
+the release's probation helper.
+
+An early `set -e` exit also used to skip restoration of update preferences. The scenario
+now installs an EXIT cleanup before clearing them. It was checked with a deliberately
+failing `open` and a nonempty sentinel preference: the scenario failed and restored the
+sentinel, then the user's original snapshot was put back.
+
+### A playback check can inherit the previous player's tap
+
+Starting the player after launching IslandBar leaves a race with the existing browser's
+session or a player pid that just exited. IslandBar can create its first tap on that old
+target, then correctly honour its 15 s minimum residency while the check's shorter IO
+timeout expires. This run reported no audio even though `harness status` showed the stable
+development grant matched. The failure was the target, not TCC.
+
+`check_playback` now suspends capture and lets the old tap retire, selects the new player,
+then restores the desktop reading so the first tap targets the fixture. It still requires
+positive `samplesRead`, distinct live levels and the applied playing state.
 
 ### `set -o pipefail` turns an early match into a failure
 

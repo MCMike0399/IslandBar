@@ -164,15 +164,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// is written last because it comes off the tap queue.
     private func debugDumpState() {
         let session = store.session
+        let artwork = session?.artwork?.representations.first
         DebugLog.line(
             "state app playing=\(store.isPlaying) session=\(session?.bundleID ?? "-") pid=\(session?.pid ?? 0) "
-                + "title=\(session?.title ?? "-") permissionDenied=\(store.audioPermissionDenied)"
+                + "title=\(session?.title ?? "-") permissionDenied=\(store.audioPermissionDenied) "
+                + "artworkPixels=\(artwork?.pixelsWide ?? 0)x\(artwork?.pixelsHigh ?? 0)"
         )
         DebugLog.line(
             "state menubar hidesBar=\(menuBarAutoHide.isActive) revealed=\(menuBarAutoHide.animationAllowed) "
                 + "card=\(menuBarAutoHide.cardIsOpen) visible=\(menuBarAutoHide.isVisible) "
                 + "pausePref=\(preferences.pauseCaptureWhileMenuBarHidden)"
         )
+        statusItem.debugDumpState()
         tapController.debugDumpState()
     }
 

@@ -44,6 +44,16 @@ The pill follows the menu bar, not the Light/Dark setting: on a light menu bar i
 
 ### The sound card
 
+Closing the card releases its views, scrolling title and glowing bars; reopening it builds
+them from the current playback and volume state. Album covers and browser thumbnails are
+decoded at up to 256 pixels, keeping the 80-point artwork sharp on Retina displays while
+avoiding full-resolution cover buffers in memory.
+
+The [performance measurements](Tools/Harness/Performance/2026-10-19/summary.json) include
+the before/after logs: about 80% less CPU after closing a scrolling card and 97% less while
+the menu bar is hidden in the controlled rendering workload. Total physical RAM savings
+in that short run were about 0.3 MiB; artwork buffers are now bounded separately.
+
 The card is one list of **sources**, shaped like Control Centre: grouped glass panels, thick
 sliders you can grab anywhere, and round buttons beside them.
 

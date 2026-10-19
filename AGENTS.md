@@ -77,6 +77,8 @@ Scripts/harness restore        # when done: quit, relaunch whatever copy was run
 | `pause` | capture stops on pause and comes back | Audio, NowPlaying |
 | `menubar` | capture suspends while the menu bar is hidden; pacing of repeat reveals | StatusItem, Audio |
 | `card` | the open card keeps capture on | Popover, StatusItem |
+| `rendering` | closed cards release their views and stop drawing; reopened cards animate | Popover, StatusItem, Visualizer |
+| `artwork` | bounded cover decoding, colour/alpha/orientation, and MediaRemote artwork delivery | NowPlaying, artwork decoding |
 | `switch` | another app taking over Now Playing gets its own tap without waiting out the old backoff | Audio, NowPlaying |
 | `packaging` | the built app launches away from `.build` | build.sh, Package.swift, Vendor, resources |
 | `update` | a release that cannot start is rolled back and skipped; a good one is kept | Updates, App launch path |
@@ -94,6 +96,7 @@ To look around by hand:
 | `menubar hidden\|revealed\|auto` | pin the menu-bar reading: `hidden` = full screen with the pointer away, `revealed` = pointer at the top; `auto` goes back to reading the screen |
 | `card` | open/close the sound card |
 | `state` | the app's internal state, one `state app/menubar/tap …` line each |
+| `resources [seconds]` | interval CPU usage and average physical memory of the running app (default 20 s) |
 | `log [n]` | the debug log without the per-second level lines |
 | `shot menubar\|card [file]` | screenshot (read the PNG to look at it; black means the Mac is locked) |
 | `status` | what is running, its signature, whether capture is blocked |

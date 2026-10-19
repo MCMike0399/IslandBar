@@ -1,0 +1,13 @@
+== rendering (a closed card releases its views and stops drawing)
+PASS  open 1: pill and card both receive levels
+PASS  open 1: the card's bars are drawing
+FAIL  close 1: the card's view tree is retained
+FAIL  close 1: a hidden card still receives levels
+FAIL  close 1: hidden glow layers are still drawing
+PASS  open 2: pill and card both receive levels
+PASS  open 2: the card's bars are drawing
+FAIL  close 2: the card's view tree is retained
+FAIL  close 2: a hidden card still receives levels
+FAIL  close 2: hidden glow layers are still drawing
+
+6 FAILED — see Scripts/harness log 80

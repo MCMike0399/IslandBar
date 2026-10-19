@@ -435,7 +435,7 @@ final class BrowserMediaResolver {
                 if !info.title.isEmpty { media.title = info.title }
                 if !info.author.isEmpty { media.artist = info.author }
             }
-            if let data = await Self.fetchThumbnail(videoID: id), let image = NSImage(data: data) {
+            if let data = await Self.fetchThumbnail(videoID: id), let image = ArtworkImage.decode(data) {
                 media.artwork = image
             }
             if enriched.count >= Self.enrichmentCacheLimit {

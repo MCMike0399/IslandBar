@@ -15,13 +15,15 @@
 #                         (Scripts/dev-signing.sh), else once per build
 #
 # Driving it
-#   player start [title]  launch the test player (a quiet generated tone + Now Playing)
+#   player start [title] [artwork.png]
+#                         launch the test player (a quiet generated tone + Now Playing)
 #   player play|pause|fullscreen|windowed|quit
 #   menubar hidden|revealed|auto
 #                         pin the menu bar reading (hidden = full screen, pointer away;
 #                         revealed = pointer at the top) or go back to reading the screen
 #   card                  open/close the sound card
 #   state                 dump the app's internal state (app / menubar / tap lines)
+#   resources [seconds]   measure CPU and physical memory of the running app (default 20)
 #
 # Looking at it
 #   log [n]               last n debug-log lines (bandLevels noise filtered), default 40
@@ -30,7 +32,7 @@
 #
 # Checking it
 #   check [scenario...]   run scenarios and print PASS/FAIL; no argument runs them all:
-#                         smoke playback pause menubar card switch packaging update
+#                         smoke playback pause menubar card rendering artwork switch packaging update
 #
 # Exit codes: 0 pass, 1 a check failed, 2 usage, 3 blocked on the user (the System Audio
 # Recording prompt, see `status`). Read AGENTS.md before relying on this.
@@ -130,7 +132,7 @@ dump_state() {
     return 1
   fi
   snapshot
-  grep -E '\] state (app|menubar|tap) ' "$SINCE" | sed 's/^\[[^]]*\] //'
+  grep -E '\] state (app|menubar|rendering|tap) ' "$SINCE" | sed 's/^\[[^]]*\] //'
 }
 
 # state_field <name> — one field (`name=value`) from a fresh state dump. It moves the
@@ -192,7 +194,9 @@ player_start() {
     pkill -x IslandBarTestPlayer || true
   fi
   : > "$PLAYER_LOG"
-  open -n --stdout "$PLAYER_LOG" --stderr "$PLAYER_LOG" "$PLAYER_APP" --args --title "$title" --level "$level"
+  local args=(--title "$title" --level "$level")
+  [[ -z "${3:-}" ]] || args+=(--artwork "$3")
+  open -n --stdout "$PLAYER_LOG" --stderr "$PLAYER_LOG" "$PLAYER_APP" --args "${args[@]}"
   for _ in $(seq 1 50); do grep -q '] playing' "$PLAYER_LOG" && break; sleep 0.2; done
   grep -q '] playing' "$PLAYER_LOG" || { cat "$PLAYER_LOG"; die "the test player did not start playing"; }
   PLAYER_TITLE="$title"
@@ -219,13 +223,20 @@ check_smoke() {
 check_playback() {
   say "== playback"
   [[ -n "$(island_pid)" ]] || launch_app
-  post debugMenuBar auto
+  # Select the fixture while capture is suspended. Otherwise an existing browser or
+  # the previous player's pid can take the first tap, whose 15 s residency outlasts
+  # this check's IO timeout and makes a healthy build look denied by TCC.
+  [[ "$(state_field card)" == "true" ]] && post debugTogglePopover
+  post debugMenuBar hidden
+  if [[ "$(state_field tapExists)" == "true" ]]; then
+    wait_for 'tap torn down reason=menu-bar-hidden|tap torn down reason=pause' 8 >/dev/null \
+      || { fail "the previous tap did not retire before selecting the player"; post debugMenuBar auto; return; }
+  fi
   mark
   player_start "Harness playback $(date +%H%M%S)"
   wait_for "session bundle=$PLAYER_ID .*title=$PLAYER_TITLE" 10 >/dev/null \
-    && pass "Now Playing session reached the app" || { fail "no session from the test player"; return; }
-  wait_for 'isPlaying=true applied|pill presence=playing' 10 >/dev/null \
-    && pass "playing state applied" || fail "playing state never applied"
+    && pass "Now Playing session reached the app" || { fail "no session from the test player"; post debugMenuBar auto; return; }
+  post debugMenuBar auto
   if ! wait_for 'tap created|procedural driver active' 12 >/dev/null; then
     tap_blocked_on_prompt && blocked_exit
     fail "neither a tap nor the procedural fallback started"; return
@@ -241,9 +252,9 @@ check_playback() {
     if [[ "$read" -gt 0 ]]; then pass "tap is delivering audio (samplesRead=$read)"
     else fail "tap runs but delivers no samples — the TCC grant does not match this build (PITFALLS.md)"; fi
   elif seen 'IO callback missing' >/dev/null; then
-    fail "the tap gets no audio — System Audio Recording is not granted for this signature (Scripts/harness permission)"
+    fail "the tap gets no audio — check the target pid and System Audio Recording grant (Scripts/harness status)"; return
   else
-    fail "no 'tap IO alive' line"
+    fail "no 'tap IO alive' line"; return
   fi
   # Live audio gives a different rms every second; a frozen tap repeats one value.
   sleep 4
@@ -252,6 +263,8 @@ check_playback() {
   distinct="$( (grep 'fromTap=true' "$SINCE" || true) | grep -o 'rms=[-0-9.]*' | tail -n 4 | sort -u | wc -l | tr -d ' ')"
   [[ "$distinct" -ge 3 ]] && pass "bars are moving ($distinct distinct levels in 4 s)" \
     || fail "bars look frozen ($distinct distinct levels from the tap in 4 s)"
+  [[ "$(state_field playing)" == "true" ]] \
+    && pass "playing state applied" || fail "playing state never applied"
 }
 
 ensure_capturing() {
@@ -374,6 +387,61 @@ check_card() {
   wait_for 'capture engine stopped reason=menu-bar-hidden' 6 >/dev/null \
     && pass "closing the card stops capture again" || fail "capture kept running after the card closed"
   post debugMenuBar auto
+}
+
+check_rendering() {
+  say "== rendering (a closed card releases its views and stops drawing)"
+  # Rendering must work for live audio and for the procedural fallback alike.
+  [[ "$(state_field playing)" == "true" ]] || check_playback
+  [[ "$(state_field playing)" == "true" ]] || { fail "no playing session to test rendering"; return; }
+  [[ "$(state_field card)" == "true" ]] && post debugTogglePopover
+  local cycle before after
+  for cycle in 1 2; do
+    post debugTogglePopover
+    sleep 2
+    [[ "$(state_field card)" == "true" && "$(state_field levelObservers)" == "2" ]] \
+      && pass "open $cycle: pill and card both receive levels" \
+      || fail "open $cycle: missing card or level observer"
+    before="$(state_field glowCommits)"
+    sleep 1
+    after="$(state_field glowCommits)"
+    [[ -n "$before" && -n "$after" && "$after" -gt "$before" ]] \
+      && pass "open $cycle: the card's bars are drawing" \
+      || fail "open $cycle: the card's bars are frozen"
+    post debugTogglePopover
+    sleep 2
+    [[ "$(state_field cardContent)" == "false" ]] \
+      && pass "close $cycle: the card's view tree is released" \
+      || fail "close $cycle: the card's view tree is retained"
+    [[ "$(state_field levelObservers)" == "1" ]] \
+      && pass "close $cycle: only the pill receives levels" \
+      || fail "close $cycle: a hidden card still receives levels"
+    before="$(state_field glowCommits)"
+    sleep 1
+    after="$(state_field glowCommits)"
+    [[ -n "$before" && "$after" == "$before" ]] \
+      && pass "close $cycle: no hidden glow drawing" \
+      || fail "close $cycle: hidden glow layers are still drawing"
+  done
+}
+
+check_artwork() {
+  say "== artwork (bounded decoding through the real Now Playing session)"
+  local checker="$WORK/artwork-check" fixture="$WORK/large-cover.png"
+  swiftc -O "$ROOT/Sources/IslandBar/NowPlaying/ArtworkImage.swift" \
+    "$ROOT/Tools/Harness/ArtworkCheck.swift" -o "$checker" \
+    || { fail "could not build artwork checks"; return; }
+  "$checker" "$fixture" || fail "artwork decoding checks failed"
+  mark
+  player_start "Harness artwork $(date +%H%M%S)" 0.05 "$fixture"
+  wait_for "session bundle=$PLAYER_ID .*title=$PLAYER_TITLE" 10 >/dev/null \
+    || { fail "artwork player never became the Now Playing session"; return; }
+  wait_for 'palette rebuilt artwork=true' 10 >/dev/null \
+    && pass "artwork reaches the palette through MediaRemote" \
+    || fail "no artwork palette from the real player"
+  [[ "$(state_field artworkPixels)" == "256x256" ]] \
+    && pass "the real app retains a 256 px cover from the Now Playing session" \
+    || fail "the real app kept oversized artwork or lost the cover"
 }
 
 # Now Playing moving to another app is a new playing session: its tap must not wait out
@@ -506,9 +574,32 @@ JSON
 launch_update_copy() {
   pkill -x IslandBar || true
   for _ in $(seq 1 25); do pgrep -x IslandBar >/dev/null || break; sleep 0.2; done
-  open --env ISLANDBAR_DEBUG=1 --env ISLANDBAR_UPDATE_FEED_URL="file://$UPD/feed/latest.json" \
-    --env ISLANDBAR_UPDATE_PUBLIC_KEY="$UPD_PUB" --env ISLANDBAR_UPDATE_AUTO_INSTALL=1 \
-    --env ISLANDBAR_UPDATE_CHECK_DELAY=2 --env ISLANDBAR_UPDATE_PROBATION=12 "$UPD/IslandBar.app"
+  # LaunchServices can still hold the exited pid after pgrep goes empty (-600).
+  # Retry that launch request; the install/healthy-marker assertions still prove
+  # the outcome, and a broken update is launched by the updater's own helper.
+  local attempt
+  for attempt in 1 2 3; do
+    if open --env ISLANDBAR_DEBUG=1 --env ISLANDBAR_UPDATE_FEED_URL="file://$UPD/feed/latest.json" \
+      --env ISLANDBAR_UPDATE_PUBLIC_KEY="$UPD_PUB" --env ISLANDBAR_UPDATE_AUTO_INSTALL=1 \
+      --env ISLANDBAR_UPDATE_CHECK_DELAY=2 --env ISLANDBAR_UPDATE_PROBATION=12 "$UPD/IslandBar.app"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+cleanup_update() {
+  trap - EXIT
+  pkill -x IslandBar || true
+  for _ in $(seq 1 25); do pgrep -x IslandBar >/dev/null || break; sleep 0.2; done
+  # The ad-hoc healthy fixture may be waiting on TCC on the tap queue. SIGTERM
+  # disarms its watchdog first; finish quitting it just as launch_app does.
+  pkill -9 -x IslandBar || true
+  restore_update_prefs
+  rm -f "$HOME/Library/Application Support/IslandBar/rolled-back"
+  [[ -z "$UPDATE_WAS_RUNNING" ]] || launch_app >/dev/null
+  return 0
 }
 
 copy_version() { defaults read "$UPD/IslandBar.app/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo "?"; }
@@ -517,7 +608,7 @@ check_update() {
   say "== update (a release that cannot start is rolled back; one that can is kept)"
   [[ "$(defaults read "$DOMAIN" automaticUpdateChecks 2>/dev/null || echo 1)" != "0" ]] \
     || { fail "automatic update checks are off in Settings; the scenario needs them"; return; }
-  local was_running=""; [[ -n "$(island_pid)" ]] && was_running=1
+  UPDATE_WAS_RUNNING=""; [[ -n "$(island_pid)" ]] && UPDATE_WAS_RUNNING=1
   player_running && post testplayer quit 2>/dev/null || true
   UPD="$WORK/update-test"
   rm -rf "$UPD"; mkdir -p "$UPD/feed"
@@ -526,6 +617,9 @@ check_update() {
   swift "$ROOT/Tools/update-signing.swift" keygen "$UPD/key" >/dev/null
   UPD_PUB="$(swift "$ROOT/Tools/update-signing.swift" pubkey "$UPD/key")"
   save_update_prefs
+  # An open/compile error exits under set -e too. Restore on those paths as well
+  # as on assertion failures, before another run can overwrite the snapshot.
+  trap cleanup_update EXIT
   clear_update_prefs
 
   # 1. A release that exits at launch.
@@ -556,21 +650,17 @@ check_update() {
     || fail "the app on disk is $(copy_version) after a healthy update"
   seen 'rolled back' >/dev/null && fail "a healthy update was rolled back" || pass "no rollback for a healthy update"
 
-  pkill -x IslandBar || true
-  for _ in $(seq 1 25); do pgrep -x IslandBar >/dev/null || break; sleep 0.2; done
-  restore_update_prefs
-  rm -f "$HOME/Library/Application Support/IslandBar/rolled-back"
-  [[ -n "$was_running" ]] && launch_app >/dev/null
+  cleanup_update
   return 0
 }
 
 run_checks() {
   local scenarios=("$@")
-  [[ ${#scenarios[@]} -gt 0 ]] || scenarios=(smoke playback pause menubar card switch packaging update)
+  [[ ${#scenarios[@]} -gt 0 ]] || scenarios=(smoke playback pause menubar card rendering artwork switch packaging update)
   build_tools
   for s in "${scenarios[@]}"; do
     case "$s" in
-      smoke|playback|pause|menubar|card|switch|packaging|update) "check_$s" ;;
+      smoke|playback|pause|menubar|card|rendering|artwork|switch|packaging|update) "check_$s" ;;
       *) die "unknown scenario: $s" ;;
     esac
   done
@@ -636,10 +726,14 @@ case "$cmd" in
   quit)
     player_running && post testplayer quit || true
     pkill -x IslandBar && say "IslandBar quit" || say "IslandBar was not running"
+    for _ in $(seq 1 25); do pgrep -x IslandBar >/dev/null || break; sleep 0.2; done
+    pkill -9 -x IslandBar || true
     ;;
   restore)
     player_running && post testplayer quit || true
     pkill -x IslandBar || true
+    for _ in $(seq 1 25); do pgrep -x IslandBar >/dev/null || break; sleep 0.2; done
+    pkill -9 -x IslandBar || true
     if [[ -s "$WORK/previous-app" ]]; then
       prev="$(cat "$WORK/previous-app")"
       sleep 1
@@ -683,7 +777,7 @@ case "$cmd" in
   player)
     sub="${1:-}"; shift || true
     case "$sub" in
-      start) player_start "${1:-}" ;;
+      start) player_start "${1:-}" 0.05 "${2:-}" ;;
       play|pause|fullscreen|windowed|quit) player_cmd "$sub"; sleep 0.5; tail -n 2 "$PLAYER_LOG" ;;
       *) die "usage: Scripts/harness player start [title] | play | pause | fullscreen | windowed | quit" ;;
     esac
@@ -696,6 +790,18 @@ case "$cmd" in
     ;;
   card) post debugTogglePopover; say "card toggled" ;;
   state) dump_state ;;
+  resources)
+    seconds="${1:-20}"
+    [[ "$seconds" =~ ^[0-9]+$ && "$seconds" -gt 0 && "$seconds" -le 3600 ]] \
+      || die "usage: Scripts/harness resources [seconds: 1..3600]"
+    pid="$(island_pid)"
+    [[ -n "$pid" ]] || die "IslandBar is not running"
+    probe="$WORK/resource-probe"
+    if [[ ! -x "$probe" || "$ROOT/Tools/Harness/ResourceProbe.c" -nt "$probe" ]]; then
+      clang -O2 -Wall -Wextra "$ROOT/Tools/Harness/ResourceProbe.c" -o "$probe"
+    fi
+    "$probe" "$pid" "$seconds"
+    ;;
   log)
     tail -n 4000 "$LOG" | grep -v 'bandLevels=' | tail -n "${1:-40}"
     ;;

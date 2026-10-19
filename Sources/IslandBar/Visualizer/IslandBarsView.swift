@@ -34,6 +34,9 @@ struct BarMetrics: Equatable {
 /// SwiftUI is involved only for the rare changes (palette, playing/idle).
 @MainActor
 final class BarsLayerView: NSView {
+    /// Cumulative debug counters let the harness detect drawing work in a closed card.
+    private(set) static var debugCommits = 0
+    private(set) static var debugGlowCommits = 0
     let metrics: BarMetrics
     private let barLayers: [CALayer]
     private let glowLayer: CALayer?
@@ -167,6 +170,10 @@ final class BarsLayerView: NSView {
             }
         }
         guard changed else { return }
+        if DebugLog.enabled {
+            Self.debugCommits += 1
+            if glowLayer != nil { Self.debugGlowCommits += 1 }
+        }
         heights = next
         CATransaction.begin()
         CATransaction.setDisableActions(true)

@@ -1,0 +1,45 @@
+IslandBar was not running
+player: playing "Harness resource measurement with a deliberately long scrolling title to exercise the complete sound card"
+before-2 fresh
+state app playing=true session=dev.burbuja-lab.islandbar.testplayer pid=30671 title=Harness resource measurement with a deliberately long scrolling title to exercise the complete sound card permissionDenied=true
+state menubar hidesBar=false revealed=true card=false visible=true pausePref=true
+state rendering cardContent=false levelObservers=1 commits=418 glowCommits=0
+state tap phase=none tapExists=false engine=false analyzer=false procedural=true pump=true suspended=false pointerReveal=false teardownPending=false permissionDenied=false
+{"pid":30628,"seconds":20.100,"cpu_percent":0.8062,"footprint_mib":13.822,"idle_wakeups_per_second":0.000}
+state app playing=true session=dev.burbuja-lab.islandbar.testplayer pid=30671 title=Harness resource measurement with a deliberately long scrolling title to exercise the complete sound card permissionDenied=true
+state menubar hidesBar=false revealed=true card=false visible=true pausePref=true
+state rendering cardContent=false levelObservers=1 commits=1615 glowCommits=0
+state tap phase=none tapExists=false engine=false analyzer=false procedural=true pump=true suspended=false pointerReveal=false teardownPending=false permissionDenied=false
+card toggled
+before-2 open
+state app playing=true session=dev.burbuja-lab.islandbar.testplayer pid=30671 title=Harness resource measurement with a deliberately long scrolling title to exercise the complete sound card permissionDenied=true
+state menubar hidesBar=false revealed=true card=true visible=true pausePref=true
+state rendering cardContent=true levelObservers=2 commits=1980 glowCommits=184
+state tap phase=none tapExists=false engine=false analyzer=false procedural=true pump=true suspended=false pointerReveal=false teardownPending=false permissionDenied=false
+{"pid":30628,"seconds":20.130,"cpu_percent":3.5735,"footprint_mib":19.713,"idle_wakeups_per_second":0.000}
+state app playing=true session=dev.burbuja-lab.islandbar.testplayer pid=30671 title=Harness resource measurement with a deliberately long scrolling title to exercise the complete sound card permissionDenied=true
+state menubar hidesBar=false revealed=true card=true visible=true pausePref=true
+state rendering cardContent=true levelObservers=2 commits=4400 glowCommits=1394
+state tap phase=none tapExists=false engine=false analyzer=false procedural=true pump=true suspended=false pointerReveal=false teardownPending=false permissionDenied=false
+card toggled
+before-2 closed
+state app playing=true session=dev.burbuja-lab.islandbar.testplayer pid=30671 title=Harness resource measurement with a deliberately long scrolling title to exercise the complete sound card permissionDenied=true
+state menubar hidesBar=false revealed=true card=false visible=true pausePref=true
+state rendering cardContent=true levelObservers=2 commits=4773 glowCommits=1581
+state tap phase=none tapExists=false engine=false analyzer=false procedural=true pump=true suspended=false pointerReveal=false teardownPending=false permissionDenied=false
+{"pid":30628,"seconds":20.105,"cpu_percent":3.3086,"footprint_mib":19.825,"idle_wakeups_per_second":0.000}
+state app playing=true session=dev.burbuja-lab.islandbar.testplayer pid=30671 title=Harness resource measurement with a deliberately long scrolling title to exercise the complete sound card permissionDenied=true
+state menubar hidesBar=false revealed=true card=false visible=true pausePref=true
+state rendering cardContent=true levelObservers=2 commits=7192 glowCommits=2792
+state tap phase=none tapExists=false engine=false analyzer=false procedural=true pump=true suspended=false pointerReveal=false teardownPending=false permissionDenied=false
+menu bar: hidden
+before-2 hidden
+state app playing=true session=dev.burbuja-lab.islandbar.testplayer pid=30671 title=Harness resource measurement with a deliberately long scrolling title to exercise the complete sound card permissionDenied=true
+state menubar hidesBar=true revealed=false card=false visible=false pausePref=true
+state rendering cardContent=true levelObservers=2 commits=7198 glowCommits=2795
+state tap phase=none tapExists=false engine=false analyzer=false procedural=false pump=false suspended=true pointerReveal=false teardownPending=false permissionDenied=false
+{"pid":30628,"seconds":20.119,"cpu_percent":2.8710,"footprint_mib":19.798,"idle_wakeups_per_second":0.000}
+state app playing=true session=dev.burbuja-lab.islandbar.testplayer pid=30671 title=Harness resource measurement with a deliberately long scrolling title to exercise the complete sound card permissionDenied=true
+state menubar hidesBar=true revealed=false card=false visible=false pausePref=true
+state rendering cardContent=true levelObservers=2 commits=7198 glowCommits=2795
+state tap phase=none tapExists=false engine=false analyzer=false procedural=false pump=false suspended=true pointerReveal=false teardownPending=false permissionDenied=false

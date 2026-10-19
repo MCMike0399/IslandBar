@@ -1,0 +1,195 @@
+{
+  "date": "2026-10-19",
+  "machine": "DiveMac, Apple M5, macOS 26.6.2",
+  "baseline": "v0.5.4 (d848bd7), plus identical debug render counters",
+  "method": {
+    "sample_seconds": 20,
+    "cpu_percent": "100% is one core; proc_pid_rusage Mach ticks converted with mach_timebase_info",
+    "memory": "average physical footprint, MiB",
+    "mode": "real app launched through LaunchServices; ISLANDBAR_DEBUG=1 and ISLANDBAR_FORCE_PROCEDURAL=1; fixture media session with long scrolling title",
+    "stages": [
+      "fresh playback",
+      "card open",
+      "card closed",
+      "menu bar hidden"
+    ],
+    "settle_seconds": {
+      "launch": 3,
+      "player": 4,
+      "card": 3,
+      "hidden": 7
+    },
+    "probe_calibration_percent": 97.8695,
+    "bar_count": 10
+  },
+  "artwork_fixture": {
+    "source_pixels": [
+      4096,
+      4096
+    ],
+    "delivered_by_macos_pixels": [
+      600,
+      600
+    ],
+    "retained_after_pixels": [
+      256,
+      256
+    ],
+    "unit_decoder_source_pixels": [
+      4096,
+      4096
+    ],
+    "unit_decoder_result_pixels": [
+      256,
+      256
+    ]
+  },
+  "limitations": [
+    "Controlled performance runs use the procedural fallback to isolate rendering from unrelated browser sessions. Real audio is validated separately by the full harness.",
+    "Layer commits measure eliminated drawing submissions, not total GPU utilization. No direct GPU power measurement.",
+    "Total physical RAM savings in these short runs are small; fresh/open artwork footprints vary and are not uniformly lower.",
+    "macOS downsizes MPMediaItemArtwork fixtures before delivering them to the app."
+  ],
+  "measurements": {
+    "before": {
+      "fresh": {
+        "pid": 30628,
+        "seconds": 20.1,
+        "cpu_percent": 0.8062,
+        "footprint_mib": 13.822,
+        "idle_wakeups_per_second": 0.0
+      },
+      "open": {
+        "pid": 30628,
+        "seconds": 20.13,
+        "cpu_percent": 3.5735,
+        "footprint_mib": 19.713,
+        "idle_wakeups_per_second": 0.0
+      },
+      "closed": {
+        "pid": 30628,
+        "seconds": 20.105,
+        "cpu_percent": 3.3086,
+        "footprint_mib": 19.825,
+        "idle_wakeups_per_second": 0.0
+      },
+      "hidden": {
+        "pid": 30628,
+        "seconds": 20.119,
+        "cpu_percent": 2.871,
+        "footprint_mib": 19.798,
+        "idle_wakeups_per_second": 0.0
+      }
+    },
+    "after": {
+      "fresh": {
+        "pid": 33141,
+        "seconds": 20.131,
+        "cpu_percent": 0.73,
+        "footprint_mib": 13.96,
+        "idle_wakeups_per_second": 0.0
+      },
+      "open": {
+        "pid": 33141,
+        "seconds": 20.113,
+        "cpu_percent": 3.6343,
+        "footprint_mib": 19.842,
+        "idle_wakeups_per_second": 0.0
+      },
+      "closed": {
+        "pid": 33141,
+        "seconds": 20.122,
+        "cpu_percent": 0.6576,
+        "footprint_mib": 19.496,
+        "idle_wakeups_per_second": 0.0
+      },
+      "hidden": {
+        "pid": 33141,
+        "seconds": 20.126,
+        "cpu_percent": 0.0894,
+        "footprint_mib": 19.47,
+        "idle_wakeups_per_second": 0.0
+      }
+    },
+    "artwork-before": {
+      "fresh": {
+        "pid": 37461,
+        "seconds": 20.111,
+        "cpu_percent": 0.7646,
+        "footprint_mib": 14.269,
+        "idle_wakeups_per_second": 0.0
+      },
+      "open": {
+        "pid": 37461,
+        "seconds": 20.112,
+        "cpu_percent": 3.546,
+        "footprint_mib": 20.595,
+        "idle_wakeups_per_second": 0.0
+      },
+      "closed": {
+        "pid": 37461,
+        "seconds": 20.132,
+        "cpu_percent": 3.0492,
+        "footprint_mib": 20.663,
+        "idle_wakeups_per_second": 0.0
+      },
+      "hidden": {
+        "pid": 37461,
+        "seconds": 20.117,
+        "cpu_percent": 2.4066,
+        "footprint_mib": 20.673,
+        "idle_wakeups_per_second": 0.0
+      }
+    },
+    "artwork-after": {
+      "fresh": {
+        "pid": 41543,
+        "seconds": 20.129,
+        "cpu_percent": 0.8512,
+        "footprint_mib": 14.681,
+        "idle_wakeups_per_second": 0.0
+      },
+      "open": {
+        "pid": 41543,
+        "seconds": 20.121,
+        "cpu_percent": 3.437,
+        "footprint_mib": 20.702,
+        "idle_wakeups_per_second": 0.0
+      },
+      "closed": {
+        "pid": 41543,
+        "seconds": 20.144,
+        "cpu_percent": 0.7025,
+        "footprint_mib": 20.396,
+        "idle_wakeups_per_second": 0.0
+      },
+      "hidden": {
+        "pid": 41543,
+        "seconds": 20.128,
+        "cpu_percent": 0.0865,
+        "footprint_mib": 20.391,
+        "idle_wakeups_per_second": 0.0
+      }
+    }
+  },
+  "closed_card_cpu_reduction_percent": 80.12,
+  "hidden_cpu_reduction_percent": 96.89,
+  "closed_card_footprint_reduction_mib": 0.329,
+  "reproduction": [
+    "Build the baseline and candidate separately with ./build.sh and preserve each signed app bundle.",
+    "On DiveMac, launch each bundle with open --env ISLANDBAR_DEBUG=1 --env ISLANDBAR_FORCE_PROCEDURAL=1 <app>.",
+    "Scripts/harness player start \"Harness resource measurement with a deliberately long scrolling title to exercise the complete sound card\" [fixture.png]",
+    "After 4 seconds, collect Scripts/harness state, Scripts/harness resources 20, Scripts/harness state.",
+    "Repeat after opening and closing the card with Scripts/harness card, settling 3 seconds each time.",
+    "Repeat after Scripts/harness menubar hidden, settling 7 seconds.",
+    "Finish with Scripts/harness menubar auto and Scripts/harness restore."
+  ],
+  "verification": {
+    "swift_build": "passed on Macintosh and DiveMac",
+    "real_audio_and_features": "smoke, playback, pause, menubar, card, rendering, artwork, switch and packaging passed in harness-initial.txt",
+    "updater": "initial healthy-copy launch hit LaunchServices -600; launch retry fixed the harness; broken rollback and healthy retention passed in update-rerun.txt",
+    "negative_control": "old app fails all six closed-card assertions while open-card drawing passes, in rendering-before.txt",
+    "cleanup_safety": "injected launch failure restored a nonempty sentinel preference; original preference snapshot restored afterward",
+    "supplementary_audio_repeat": "exit 3, blocked on macOS System Audio Recording after the ad-hoc update fixture; no app code changed since the earlier passing real-audio run"
+  }
+}

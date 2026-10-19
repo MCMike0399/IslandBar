@@ -13,6 +13,7 @@
 // .build/harness/player.log.
 //
 // Options: --title <text>  --level <0…1, default 0.05>
+//          --artwork <path>  publish a fixture cover through MediaRemote
 //
 // The tone is quiet on purpose: this runs on someone's working Mac. IslandBar measures
 // each band against its own running mean, so loudness does not change what it shows.
@@ -61,6 +62,7 @@ final class Player: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
     private var elapsed: Double = 0
     private var startedAt: Date?
+    private let artwork = option("--artwork").flatMap { NSImage(contentsOfFile: $0) }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let format = engine.outputNode.inputFormat(forBus: 0)
@@ -138,13 +140,17 @@ final class Player: NSObject, NSApplicationDelegate {
     }
 
     private func publish(rate: Double) {
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+        var info: [String: Any] = [
             MPMediaItemPropertyTitle: title,
             MPMediaItemPropertyArtist: "IslandBar harness",
             MPMediaItemPropertyPlaybackDuration: 3_600.0,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
             MPNowPlayingInfoPropertyPlaybackRate: rate,
         ]
+        if let artwork {
+            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: artwork.size) { _ in artwork }
+        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
 
     /// Real full screen, for checking `MenuBarAutoHide`'s own detection. macOS only lets

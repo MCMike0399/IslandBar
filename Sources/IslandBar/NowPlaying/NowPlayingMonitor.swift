@@ -67,6 +67,8 @@ final class NowPlayingStore {
     @ObservationIgnored
     private var levelObservers: [UUID: (BarLevels) -> Void] = [:]
 
+    var levelObserverCount: Int { levelObservers.count }
+
     func addLevelObserver(_ observer: @escaping (BarLevels) -> Void) -> UUID {
         let id = UUID()
         levelObservers[id] = observer
@@ -247,8 +249,17 @@ final class NowPlayingMonitor: MediaTransport {
             if payload.artworkDataBase64 == nil, store.session?.paletteKey == key { return lastArtworkBase64 }
             return payload.artworkDataBase64
         }()
-        let artwork: NSImage? = payload.artwork
-            ?? (store.session?.paletteKey == key ? store.session?.artwork : nil)
+        let artwork: NSImage?
+        if let encoded = payload.artworkDataBase64 {
+            if encoded == lastArtworkBase64, let cached = rawSession?.artwork {
+                artwork = cached
+            } else {
+                artwork = Data(base64Encoded: encoded).flatMap(ArtworkImage.decode) ?? payload.artwork
+            }
+        } else {
+            artwork = payload.artwork
+                ?? (store.session?.paletteKey == key ? store.session?.artwork : nil)
+        }
         lastArtworkBase64 = artworkBase64
         let raw = Session(
             bundleID: payload.bundleIdentifier ?? "",
