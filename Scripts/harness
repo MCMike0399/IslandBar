@@ -32,7 +32,7 @@
 #
 # Checking it
 #   check [scenario...]   run scenarios and print PASS/FAIL; no argument runs them all:
-#                         smoke playback pause menubar card rendering artwork switch packaging update
+#                         smoke playback pause menubar card rendering artwork switch listener packaging update
 #
 # Exit codes: 0 pass, 1 a check failed, 2 usage, 3 blocked on the user (the System Audio
 # Recording prompt, see `status`). Read AGENTS.md before relying on this.
@@ -654,13 +654,47 @@ check_update() {
   return 0
 }
 
+check_listener() {
+  say "== listener (recycle with a concurrent host retry, then parent EOF)"
+  if (
+    # This scenario uses real adapter code and a controlled helper burst, with no audio.
+    trial="$(mktemp -d "$WORK/listener.XXXXXX")" || exit 1
+    trap 'rm -rf "$trial"' EXIT
+    vendor="$ROOT/Vendor/MediaRemoteAdapter"
+    build=(swift build --package-path "$vendor" --scratch-path "$WORK/listener-build")
+    "${build[@]}" || exit 1
+    bin="$("${build[@]}" --show-bin-path)" || exit 1
+    mkdir -p "$trial/include"
+    cat > "$trial/include/module.modulemap" <<MAP
+module CIMediaRemote {
+  umbrella "$vendor/Sources/CIMediaRemote/include"
+  export *
+}
+MAP
+    swiftc "$ROOT/Tools/Harness/ListenerProbe.swift" -I "$bin" -I "$trial/include" \
+      -L "$bin" -lMediaRemoteAdapter -Xlinker -rpath -Xlinker "$bin" \
+      -o "$trial/listener-probe" || exit 1
+    bundle=MediaRemoteAdapter_MediaRemoteAdapter.bundle
+    original="$(find "$bin/$bundle" -name run.pl -print)"
+    "$trial/listener-probe" eof "$original" "$bin/libMediaRemoteAdapter.dylib" || exit 1
+    ditto "$bin/$bundle" "$trial/$bundle" || exit 1
+    script="$(find "$trial/$bundle" -name run.pl -print)"
+    cp "$ROOT/Tools/Harness/ListenerBurst.pl" "$script" || exit 1
+    ISLANDBAR_LISTENER_PROBE_MARKER="$trial/first" "$trial/listener-probe" recycle
+  ); then
+    pass "exactly one listener survived recycling, and no helpers survived stop or EOF"
+  else
+    fail "MediaRemote listener lifecycle"
+  fi
+}
+
 run_checks() {
   local scenarios=("$@")
-  [[ ${#scenarios[@]} -gt 0 ]] || scenarios=(smoke playback pause menubar card rendering artwork switch packaging update)
+  [[ ${#scenarios[@]} -gt 0 ]] || scenarios=(smoke playback pause menubar card rendering artwork switch listener packaging update)
   build_tools
   for s in "${scenarios[@]}"; do
     case "$s" in
-      smoke|playback|pause|menubar|card|rendering|artwork|switch|packaging|update) "check_$s" ;;
+      smoke|playback|pause|menubar|card|rendering|artwork|switch|listener|packaging|update) "check_$s" ;;
       *) die "unknown scenario: $s" ;;
     esac
   done

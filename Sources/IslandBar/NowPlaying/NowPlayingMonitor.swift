@@ -159,6 +159,9 @@ final class NowPlayingMonitor: MediaTransport {
                 self?.handle(info)
             }
         }
+        controller.onListenerDiagnostic = { message in
+            DebugLog.line("MediaRemote listener \(message)")
+        }
         controller.onListenerTerminated = { [weak self] in
             Task { @MainActor in
                 self?.scheduleRestart()
@@ -481,7 +484,8 @@ final class NowPlayingMonitor: MediaTransport {
         restartAttempt += 1
         DebugLog.line("listener terminated; restart in \(delay)s")
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            self?.controller.startListening()
+            guard let self, self.healthTimer != nil else { return }
+            self.controller.startListening()
         }
     }
 }

@@ -80,6 +80,7 @@ Scripts/harness restore        # when done: quit, relaunch whatever copy was run
 | `rendering` | closed cards release their views and stop drawing; reopened cards animate | Popover, StatusItem, Visualizer |
 | `artwork` | bounded cover decoding, colour/alpha/orientation, and MediaRemote artwork delivery | NowPlaying, artwork decoding |
 | `switch` | another app taking over Now Playing gets its own tap without waiting out the old backoff | Audio, NowPlaying |
+| `listener` | MediaRemote helper recycling, concurrent retries, and exit on parent EOF | NowPlaying listener lifecycle, MediaRemoteAdapter |
 | `packaging` | the built app launches away from `.build` | build.sh, Package.swift, Vendor, resources |
 | `update` | a release that cannot start is rolled back and skipped; a good one is kept | Updates, App launch path |
 

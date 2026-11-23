@@ -374,6 +374,22 @@ Read the debug log (`ISLANDBAR_DEBUG=1`, `~/Library/Logs/IslandBar/debug.log`) i
 5. `procedural driver active reason=…` — the tap was abandoned on purpose; the reason string
    says why (`permission-denied`, `forced-procedural`, `io-timeout`, `no-targets`).
 
+### A listener recycle can leave old Perl processes alive
+
+MediaRemote runs in a child process so it can be recycled after a batch of updates. The old
+recycle cleared the tracked process before running an unconditional delayed start, so a health
+check could start a helper in that gap and the delayed start would overwrite its reference.
+An old termination callback could also clear the new helper. The orphaned helpers kept running
+their MediaRemote loops, even after their stdin pipes closed. On Macintosh this accumulated to
+1,804 helpers before it was spotted.
+
+Keep ownership through termination, check the process identity in callbacks, and let EOF end
+the child loop if the parent disappears. With `ISLANDBAR_DEBUG=1`, look for
+`MediaRemote listener started/stopping/exited` plus the helper PID in the debug log. One helper
+with the `run.pl … loop` command should be alive at a time. `Scripts/harness check listener`
+forces a burst across the recycle threshold and a concurrent start request, then checks stop
+and parent EOF.
+
 ## Diagnosing "the icon vanished and came back"
 
 That is a crash plus the relaunch watchdog, not a drawing bug. The watchdog polls every 2 s

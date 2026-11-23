@@ -350,9 +350,9 @@ static void setupStdinReader(void) {
                 continue;
             }
             if (n == 0) {
-                // EOF: parent closed stdin. Stop reading further.
-                dispatch_source_cancel(_stdinSource);
-                break;
+                // PATCH (IslandBar): this process exists to serve the parent. A
+                // crash or forced quit closes its pipe even if it cannot send SIGTERM.
+                exit(EXIT_SUCCESS);
             }
             // n < 0
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;

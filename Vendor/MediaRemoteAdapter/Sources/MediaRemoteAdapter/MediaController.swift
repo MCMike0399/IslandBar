@@ -29,13 +29,13 @@ public class MediaController {
         return path
     }
 
+    // PATCH (IslandBar): listener lifecycle and callbacks are confined to the main
+    // queue. Keep ownership during shutdown, so health checks can't spawn a second helper.
     private var listeningProcess: Process?
-    private var listeningInputPipe: Pipe?
-    private var dataBuffer = Data()
-    private var dataBufferSearchStart = 0
+    private var listeningRequested = false
+    private var listenerStopping = false
     private var lastTrackInfo: TrackInfo?
     private var eventCount = 0
-    private let bufferLock = NSLock()
     private let restartThreshold = 100
     private let commandQueue = DispatchQueue(label: "mediaremote-adapter.commands")
     private static let sigpipeIgnored: Void = {
@@ -45,11 +45,12 @@ public class MediaController {
     // PATCH (IslandBar): lets the host health-check the listener and restart it when the
     // helper died before producing any event (onListenerTerminated only fires after events).
     public var isListening: Bool {
-        listeningProcess?.isRunning == true
+        listeningProcess?.isRunning == true && !listenerStopping
     }
 
     public var onTrackInfoReceived: ((TrackInfo?) -> Void)?
     public var onListenerTerminated: (() -> Void)?
+    public var onListenerDiagnostic: ((String) -> Void)?
     public var onDecodingError: ((Error, Data) -> Void)?
 
     public init() {
@@ -202,119 +203,116 @@ public class MediaController {
     }
 
     public func startListening() {
-        guard listeningProcess == nil else {
-            return
-        }
+        listeningRequested = true
+        guard listeningProcess == nil,
+              let scriptPath = perlScriptPath,
+              let libraryPath = libraryPath else { return }
 
-        eventCount = 0
-        startListeningInternal()
-    }
-
-    private func startListeningInternal() {
-        guard let scriptPath = perlScriptPath else {
-            return
-        }
-        guard let libraryPath = libraryPath else {
-            return
-        }
-
-        listeningProcess = Process()
-        listeningProcess?.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
-
-        listeningProcess?.arguments = [scriptPath, libraryPath, "loop"]
-
-        let inputPipe = Pipe()
-        listeningProcess?.standardInput = inputPipe
-        self.listeningInputPipe = inputPipe
-
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+        process.arguments = [scriptPath, libraryPath, "loop"]
+        process.standardInput = Pipe()
         let outputPipe = Pipe()
-        listeningProcess?.standardOutput = outputPipe
+        process.standardOutput = outputPipe
 
-        outputPipe.fileHandleForReading.readabilityHandler = { [weak self] fileHandle in
-            guard let self = self else { return }
-
-            let incomingData = fileHandle.availableData
-            if incomingData.isEmpty {
-                fileHandle.readabilityHandler = nil
+        // The buffer belongs to this process alone. A callback already reading the
+        // retiring pipe can't append bytes to the replacement's stream.
+        let outputLock = NSLock()
+        var buffer = Data()
+        var searchStart = 0
+        outputPipe.fileHandleForReading.readabilityHandler = { [weak self, weak process] handle in
+            let incoming = handle.availableData
+            guard !incoming.isEmpty else {
+                handle.readabilityHandler = nil
                 return
             }
-            
-            self.bufferLock.lock()
-            defer { self.bufferLock.unlock() }
 
-            self.dataBuffer.append(incomingData)
+            outputLock.lock()
+            defer { outputLock.unlock() }
 
-            guard let newlineData = "\n".data(using: .utf8) else { return }
-            while let range = self.dataBuffer.firstRange(of: newlineData, in: self.dataBufferSearchStart..<self.dataBuffer.count) {
-                guard range.lowerBound <= self.dataBuffer.count else {
-                    break
-                }
+            buffer.append(incoming)
+            while let newline = buffer[searchStart...].firstIndex(of: 0x0A) {
+                let line = buffer.subdata(in: 0..<newline)
+                buffer.removeSubrange(0...newline)
+                searchStart = 0
+                guard !line.isEmpty else { continue }
 
-                let lineData = self.dataBuffer.subdata(in: 0..<range.lowerBound)
-
-                self.dataBuffer.removeSubrange(0..<range.upperBound)
-                self.dataBufferSearchStart = 0
-
-                if lineData == "NIL".data(using: .utf8) {
+                if line == Data("NIL".utf8) {
                     DispatchQueue.main.async {
+                        guard let self, let process, self.acceptsOutput(from: process) else { return }
                         self.onTrackInfoReceived?(nil)
                     }
                     continue
                 }
 
-                if !lineData.isEmpty {
+                let decoded = Result { try JSONDecoder().decode(TrackInfo.self, from: line) }
+                DispatchQueue.main.async {
+                    guard let self, let process, self.acceptsOutput(from: process) else { return }
                     self.eventCount += 1
+                    switch decoded {
+                    case .success(let track):
+                        let emitted = self.preservingArtworkIfDowngrade(track)
+                        self.lastTrackInfo = emitted
+                        self.onTrackInfoReceived?(emitted)
+                    case .failure(let error):
+                        self.onDecodingError?(error, line)
+                    }
 
-                    do {
-                        let trackInfo = try JSONDecoder().decode(TrackInfo.self, from: lineData)
+                    if self.eventCount == self.restartThreshold {
+                        // Let already queued metadata through, then request one recycle.
                         DispatchQueue.main.async {
-                            let emitted = self.preservingArtworkIfDowngrade(trackInfo)
-                            self.lastTrackInfo = emitted
-                            self.onTrackInfoReceived?(emitted)
-
-                            if self.eventCount >= self.restartThreshold {
-                                self.restartListeningProcess()
-                            }
-                        }
-                    } catch {
-                        DispatchQueue.main.async {
-                            self.onDecodingError?(error, lineData)
+                            guard self.acceptsOutput(from: process) else { return }
+                            self.retireListener(reason: "event-limit")
                         }
                     }
                 }
             }
-
-            self.dataBufferSearchStart = self.dataBuffer.count
+            searchStart = buffer.count
         }
 
-        listeningProcess?.terminationHandler = { [weak self] process in
+        process.terminationHandler = { [weak self] process in
             DispatchQueue.main.async {
-                self?.listeningProcess = nil
-                self?.listeningInputPipe = nil
-                if self?.eventCount != 0 {
-                    self?.onListenerTerminated?()
+                guard let self, self.listeningProcess === process else { return }
+                let restart = self.listenerStopping && self.listeningRequested
+                let notify = !self.listenerStopping && self.eventCount > 0
+                self.listeningProcess = nil
+                self.listenerStopping = false
+                self.onListenerDiagnostic?("exited pid=\(process.processIdentifier) reason=\(process.terminationReason.rawValue) status=\(process.terminationStatus)")
+                if restart {
+                    self.startListening()
+                } else if notify {
+                    self.onListenerTerminated?()
                 }
             }
         }
 
         do {
-            try listeningProcess?.run()
+            eventCount = 0
+            try process.run()
+            listeningProcess = process
+            onListenerDiagnostic?("started pid=\(process.processIdentifier)")
         } catch {
-            print("Failed to start listening process: \(error)")
-            listeningProcess = nil
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            onListenerDiagnostic?("start failed: \(error.localizedDescription)")
         }
     }
 
     public func stopListening() {
-        (listeningProcess?.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
-        listeningProcess?.terminate()
-        listeningProcess = nil
-        listeningInputPipe = nil
-        
-        bufferLock.lock()
-        defer { bufferLock.unlock() }
-        dataBuffer.removeAll()
-        dataBufferSearchStart = 0
+        listeningRequested = false
+        retireListener(reason: "stop")
+    }
+
+    private func acceptsOutput(from process: Process) -> Bool {
+        listeningProcess === process && !listenerStopping
+    }
+
+    private func retireListener(reason: String) {
+        guard let process = listeningProcess, !listenerStopping else { return }
+        listenerStopping = true
+        onListenerDiagnostic?("stopping pid=\(process.processIdentifier) reason=\(reason) events=\(eventCount)")
+        if process.isRunning {
+            process.terminate()
+        }
     }
 
     private func sendCommand(_ arguments: [String]) {
@@ -322,24 +320,24 @@ public class MediaController {
         let line = arguments.joined(separator: " ") + "\n"
         guard let data = line.data(using: .utf8) else { return }
 
-        commandQueue.async { [weak self] in
-            guard let self = self else { return }
-            if let process = self.listeningProcess,
-               process.isRunning,
-               let pipe = self.listeningInputPipe {
-                let handle = pipe.fileHandleForWriting
-                do {
-                    if #available(macOS 10.15.4, *) {
-                        try handle.write(contentsOf: data)
-                    } else {
-                        handle.write(data)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let pipe = self.isListening ? self.listeningProcess?.standardInput as? Pipe : nil
+            self.commandQueue.async {
+                if let handle = pipe?.fileHandleForWriting {
+                    do {
+                        if #available(macOS 10.15.4, *) {
+                            try handle.write(contentsOf: data)
+                        } else {
+                            handle.write(data)
+                        }
+                        return
+                    } catch {
+                        // Pipe closed under us; fall through to spawn.
                     }
-                    return
-                } catch {
-                    // Pipe closed under us; fall through to spawn.
                 }
+                _ = self.runPerlCommand(arguments: arguments)
             }
-            _ = self.runPerlCommand(arguments: arguments)
         }
     }
 
@@ -428,22 +426,5 @@ public class MediaController {
             artwork: previous.payload.artwork
         )
         return TrackInfo(payload: merged)
-    }
-
-    private func restartListeningProcess() {
-        (listeningProcess?.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
-        listeningProcess?.terminate()
-        listeningProcess = nil
-        listeningInputPipe = nil
-        
-        bufferLock.lock()
-        defer { bufferLock.unlock() }
-        dataBuffer.removeAll()
-        dataBufferSearchStart = 0
-        eventCount = 0
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            self?.startListeningInternal()
-        }
     }
 }
